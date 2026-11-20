@@ -24,14 +24,16 @@ import {
 } from 'lucide-react'
 import { AuthScreen, GroupPanel } from './AccountViews.jsx'
 import ChatPage from './ChatPage.jsx'
+import { describeDuplicate, saveExpense } from './expenseApi.js'
 import './styles.css'
 
 const categoryMeta = {
   餐饮: { icon: Utensils, color: '#ef8b72', soft: '#fff0eb' },
   交通: { icon: TrainFront, color: '#6d8db6', soft: '#edf3fb' },
   娱乐: { icon: Sparkles, color: '#bb8cce', soft: '#f5eef9' },
-  居家: { icon: Home, color: '#72a586', soft: '#edf7ef' },
   购物: { icon: ShoppingBag, color: '#d6a15f', soft: '#fff6e8' },
+  居住: { icon: Home, color: '#72a586', soft: '#edf7ef' },
+  其他: { icon: CircleDollarSign, color: '#8c9d62', soft: '#f2f5e8' },
 }
 const incomeCategoryMeta = {
   工资: { icon: BriefcaseBusiness, color: '#4c9671', soft: '#edf7ef' },
@@ -83,6 +85,7 @@ function App() {
   const [activeFilter, setActiveFilter] = useState('全部')
   const [search, setSearch] = useState('')
   const [showModal, setShowModal] = useState(false)
+  const [selectedTransaction, setSelectedTransaction] = useState(null)
   const [entryType, setEntryType] = useState('expense')
   const [entryCategory, setEntryCategory] = useState('餐饮')
   const [showGroupPanel, setShowGroupPanel] = useState(false)
@@ -107,7 +110,7 @@ function App() {
     const matchesType = typeFilter === 'all' || item.type === typeFilter
     const matchesFilter = activeFilter === '全部' || item.category === activeFilter
     const term = search.trim().toLowerCase()
-    return matchesType && matchesFilter && (!term || `${item.merchant}${item.note}${item.category}${item.payer}`.toLowerCase().includes(term))
+    return matchesType && matchesFilter && (!term || (item.productName || '').toLowerCase().includes(term))
   })
   const monthIncome = transactions.reduce((total, item) => total + (item.type === 'income' ? Number(item.amount) : 0), 0)
   const monthExpense = transactions.reduce((total, item) => total + (item.type === 'income' ? 0 : Number(item.amount)), 0)
@@ -181,20 +184,23 @@ function App() {
     setError('')
     const form = new FormData(event.currentTarget)
     try {
-      const response = await fetch(`/api/groups/${activeGroupId}/expenses`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const expense = {
           date: form.get('date'),
+          time: form.get('time') || null,
           merchant: form.get('category'),
+          productName: form.get('productName'),
           note: form.get('note'),
           category: form.get('category'),
           amount: form.get('amount'),
           payerId: form.get('payerId'),
           type: entryType,
-        }),
-      })
-      const result = await readJson(response)
+      }
+      let result = await saveExpense(activeGroupId, expense)
+      while (result.duplicates) {
+        const details = result.duplicates.map(describeDuplicate).join('\n')
+        if (!window.confirm(`发现可能重复的账单：\n${details}\n\n仍要保存吗？`)) return
+        result = await saveExpense(activeGroupId, expense, result.duplicates.map((item) => item.id))
+      }
       setShowModal(false)
       const expenseMonth = result.expense.date.slice(0, 7)
       if (expenseMonth !== month) setMonth(expenseMonth)
@@ -281,14 +287,8 @@ function App() {
         </header>
 
         {activePage === 'ledger' ? <>
-        <div className="page-heading">
-          <div><h1>CoRec</h1></div>
-          <button className="primary-button" onClick={() => setShowModal(true)}><Plus size={18} strokeWidth={2.5} />记一笔</button>
-        </div>
-
         <section className="month-toolbar">
           <div className="month-picker"><button className="round-button" aria-label="上个月" onClick={() => shiftMonth(-1)}><ArrowLeft size={16} /></button><span>{monthLabel}</span><button className="round-button" aria-label="下个月" onClick={() => shiftMonth(1)}><ArrowRight size={16} /></button></div>
-          <span className="view-label"><span className="live-dot" />{activeGroup?.name}</span>
         </section>
 
         <section className="balance-summary" aria-label="账本余额">
@@ -307,16 +307,19 @@ function App() {
               </div>
               <label className="category-filter"><span>分类</span><select value={activeFilter} onChange={(event) => setActiveFilter(event.target.value)}><option value="全部">全部分类</option>{filterCategories.map((category) => <option key={category}>{category}</option>)}</select></label>
             </div>
-            <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索账单" aria-label="搜索账单" /></label>
+            <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="按商品名筛选" aria-label="按商品名筛选" /></label>
           </div>
           <div className="transactions-list">
-            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>换个关键词或分类试试</div></> : <>这个月还没有账单<div>记下群组的第一笔共同支出</div></>}</div>}
+            <div className="transaction-header" aria-hidden="true"><span>日期</span><span className="transaction-header-icon" /><span>分类</span><span>商品</span><span>商家</span><span>成员</span><span className="transaction-header-amount">金额</span><span /></div>
+            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>换个关键词或分类试试</div></> : <>这个月还没有账单<div>记下群组的第一笔共同支出</div></>}</div>}
           </div>
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
         <LedgerCharts groupId={activeGroupId} month={month} />
         </> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={() => loadLedger(month)} />}
       </main>
+
+      {selectedTransaction && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTransaction(null)}><section className="expense-modal transaction-detail" role="dialog" aria-modal="true" aria-labelledby="transaction-detail-title"><div className="modal-head"><h2 id="transaction-detail-title">账单详情</h2><button type="button" className="close-button" onClick={() => setSelectedTransaction(null)} aria-label="关闭"><X size={19} /></button></div><dl>{[['类型', selectedTransaction.type === 'income' ? '收入' : '支出'], ['金额', `¥${formatMoney(selectedTransaction.amount)}`], ['分类', selectedTransaction.category], ['商品名', selectedTransaction.productName || '未填写'], ['商家', selectedTransaction.merchant && selectedTransaction.merchant !== selectedTransaction.category ? selectedTransaction.merchant : '未填写'], ['日期', selectedTransaction.date], ['时间', selectedTransaction.time || '未记录'], [selectedTransaction.type === 'income' ? '收入归属' : '付款人', selectedTransaction.payer], ['备注', selectedTransaction.note || '无']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></section></div>}
 
       {showModal && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowModal(false)}>
         <form className={`expense-modal ${entryType === 'income' ? 'income-entry' : ''}`} onSubmit={addTransaction}>
@@ -327,6 +330,8 @@ function App() {
             <label><span>分类</span><select name="category" value={entryCategory} onChange={(event) => setEntryCategory(event.target.value)}>{(entryType === 'income' ? incomeCategories : Object.keys(categoryMeta)).map((item) => <option key={item}>{item}</option>)}</select></label>
             <label><span>{entryType === 'income' ? '收入归属' : '谁支付'}</span><select name="payerId" defaultValue={user.id}>{members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select></label>
             <label><span>日期</span><input name="date" type="date" defaultValue={today} required /></label>
+            <label><span>时间</span><input name="time" type="time" defaultValue={`${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}`} required /></label>
+            <label><span>商品名 <em>选填</em></span><input name="productName" placeholder="输入商品名" maxLength="100" /></label>
           </div>
           <label><span>备注 <em>选填</em></span><input name="note" placeholder={entryType === 'income' ? '补充收入说明' : '写点这笔支出的来由'} maxLength="250" /></label>
           {error && <div className="error-banner" role="alert">{error}</div>}
@@ -339,15 +344,16 @@ function App() {
   )
 }
 
-function TransactionRow({ item, today, onDelete }) {
+function TransactionRow({ item, today, onDelete, onOpen }) {
   const isIncome = item.type === 'income'
   const meta = (isIncome ? incomeCategoryMeta : categoryMeta)[item.category] || categoryMeta['餐饮']
   const Icon = meta.icon
   const date = formatDate(item.date, today)
   const avatar = Number(item.payerId) % 2 === 0 ? 'blue' : 'coral'
   const initials = item.payer?.slice(0, 1) || '?'
-  const title = item.merchant === item.category ? item.category : item.merchant
-  return <div className={`transaction-row ${isIncome ? 'income-row' : ''}`}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-copy"><strong>{title}</strong><span>{item.note || (isIncome ? '共同收入' : '共同开销')}</span></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isIncome ? 'transaction-amount income' : 'transaction-amount'}>{isIncome ? '+' : '−'} ¥{formatMoney(item.amount)}</strong><button className="row-more" aria-label={`${title}删除账单`} onClick={() => onDelete(item.id)} title="删除账单"><Trash2 size={16} /></button></div>
+  const title = item.productName || '-'
+  const merchant = item.merchant && item.merchant !== item.category ? item.merchant : '-'
+  return <div className={`transaction-row ${isIncome ? 'income-row' : ''}`}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}{item.time ? ` ${item.time}` : ''}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-merchant" title={item.category}><strong>{item.category}</strong></div><button type="button" className="transaction-copy transaction-open" onClick={() => onOpen(item)} aria-label={`查看${item.productName || item.category}账单详情`} title={title}><strong>{title}</strong></button><div className="transaction-merchant" title={merchant}><strong>{merchant}</strong></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isIncome ? 'transaction-amount income' : 'transaction-amount'}>{isIncome ? '+' : '−'} ¥{formatMoney(item.amount)}</strong><button className="row-more" aria-label={`${item.productName || item.category}删除账单`} onClick={() => onDelete(item.id)} title="删除账单"><Trash2 size={16} /></button></div>
 }
 
 function monthEnd(month) {

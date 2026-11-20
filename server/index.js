@@ -9,7 +9,7 @@ import mysql from 'mysql2/promise'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
-const categories = new Set(['餐饮', '交通', '娱乐', '居家', '购物'])
+const categories = new Set(['餐饮', '交通', '娱乐', '购物', '居住', '其他'])
 const incomeCategories = new Set(['工资', '奖金', '退款', '其他收入'])
 const monthPattern = /^\d{4}-(0[1-9]|1[0-2])$/
 const datePattern = /^\d{4}-\d{2}-\d{2}$/
@@ -35,6 +35,7 @@ const pool = mysql.createPool({
 })
 
 app.set('trust proxy', 1)
+app.use('/api/groups/:groupId/llm/chat', express.json({ limit: '6mb' }))
 app.use(express.json({ limit: '20kb' }))
 app.use(cookieParser())
 
@@ -58,7 +59,9 @@ function serializeExpense(row) {
     id: row.id,
     type: row.entry_type || 'expense',
     date: row.date,
+    time: row.transaction_time || null,
     merchant: row.merchant,
+    productName: row.product_name || '',
     note: row.note,
     category: row.category,
     amount: Number(row.amount_cents) / 100,
@@ -229,7 +232,9 @@ async function ensureSchema() {
       entry_type ENUM('expense', 'income') NOT NULL DEFAULT 'expense',
       group_id INT UNSIGNED NOT NULL,
       date DATE NOT NULL,
+      transaction_time TIME NULL,
       merchant VARCHAR(100) NOT NULL,
+      product_name VARCHAR(100) NOT NULL DEFAULT '',
       note VARCHAR(250) NOT NULL DEFAULT '',
       category VARCHAR(20) NOT NULL,
       amount_cents BIGINT UNSIGNED NOT NULL,
@@ -249,10 +254,13 @@ async function ensureSchema() {
   const [columns] = await pool.query('SHOW COLUMNS FROM expenses')
   const names = new Set(columns.map((column) => column.Field))
   if (!names.has('entry_type')) await pool.query("ALTER TABLE expenses ADD COLUMN entry_type ENUM('expense', 'income') NOT NULL DEFAULT 'expense' AFTER id")
+  if (!names.has('product_name')) await pool.query("ALTER TABLE expenses ADD COLUMN product_name VARCHAR(100) NOT NULL DEFAULT '' AFTER merchant")
+  if (!names.has('transaction_time')) await pool.query('ALTER TABLE expenses ADD COLUMN transaction_time TIME NULL AFTER date')
   if (!names.has('group_id')) await pool.query('ALTER TABLE expenses ADD COLUMN group_id INT UNSIGNED NULL AFTER id')
   if (!names.has('payer_user_id')) await pool.query('ALTER TABLE expenses ADD COLUMN payer_user_id INT UNSIGNED NULL AFTER amount_cents')
   if (!names.has('payer')) await pool.query('ALTER TABLE expenses ADD COLUMN payer VARCHAR(80) NULL AFTER payer_user_id')
   if (!names.has('created_by')) await pool.query('ALTER TABLE expenses ADD COLUMN created_by INT UNSIGNED NULL AFTER payer')
+  await pool.execute("UPDATE expenses SET category = '居住' WHERE entry_type = 'expense' AND category = '居家'")
   if (names.has('payer') && columns.find((column) => column.Field === 'payer')?.Type !== 'varchar(80)') {
     await pool.query("ALTER TABLE expenses MODIFY payer VARCHAR(80) NOT NULL DEFAULT ''")
   }
@@ -424,6 +432,28 @@ app.post('/api/groups/:groupId/llm/chat', requireAuth, llmLimiter, requireGroupM
   if (!validMessages || messages.reduce((size, message) => size + message.content.length, 0) > 5000) {
     return response.status(400).json({ error: '对话内容过长或格式无效。' })
   }
+  const imageMessages = messages.filter((message) => message.image !== undefined)
+  if (imageMessages.length > 1 || imageMessages.some((message) => {
+    if (message.role !== 'user' || typeof message.image !== 'string' || message.image.length > 5592500) return true
+    const match = /^data:image\/(jpeg|png|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/.exec(message.image)
+    if (!match || match[2].length % 4 !== 0) return true
+    const bytes = Buffer.from(match[2], 'base64')
+    if (!bytes.length || bytes.length > 4 * 1024 * 1024 || bytes.toString('base64') !== match[2]) return true
+    const signatures = {
+      jpeg: bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])),
+      png: bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+      gif: bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a',
+      webp: bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP',
+    }
+    return !signatures[match[1]]
+  })) return response.status(400).json({ error: '图片格式无效或超过 4 MB。' })
+
+  const modelMessages = messages.map(({ role, content, image }) => ({
+    role,
+    content: image ? (config.apiFormat === 'responses'
+      ? [{ type: 'input_text', text: content }, { type: 'input_image', image_url: image }]
+      : [{ type: 'text', text: content }, { type: 'image_url', image_url: { url: image } }]) : content,
+  }))
 
   let endpoint
   try {
@@ -442,11 +472,11 @@ app.post('/api/groups/:groupId/llm/chat', requireAuth, llmLimiter, requireGroupM
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
       body: JSON.stringify(config.apiFormat === 'responses' ? {
         model: config.model,
-        input: messages,
+        input: modelMessages,
       } : {
         model: config.model,
         temperature: 0.1,
-        messages,
+        messages: modelMessages,
       }),
     })
     const body = await upstream.text()
@@ -508,12 +538,12 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
   const [year, monthNumber] = month.split('-').map(Number)
   const nextMonth = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10)
   const [rows] = await pool.execute(`
-    SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, e.merchant, e.note, e.category,
+    SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
       e.entry_type, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
     FROM expenses e
     LEFT JOIN accounts a ON a.id = e.payer_user_id
     WHERE e.group_id = ? AND e.date >= ? AND e.date < ?
-    ORDER BY e.date DESC, e.id DESC
+    ORDER BY e.date DESC, e.transaction_time DESC, e.id DESC
   `, [request.group.id, `${month}-01`, nextMonth])
   const [balanceRows] = await pool.execute(`
     SELECT COALESCE(SUM(CASE
@@ -527,7 +557,7 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
 })
 
 app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async (request, response) => {
-  const { date, merchant, note = '', category, amount, payerId, type = 'expense' } = request.body || {}
+  const { date, time = null, merchant, productName = '', note = '', category, amount, payerId, type = 'expense', confirmedDuplicateIds = [] } = request.body || {}
   const parsedAmount = Number(amount)
   const parsedDate = typeof date === 'string' && datePattern.test(date) ? new Date(`${date}T00:00:00Z`) : null
   const validDate = parsedDate && !Number.isNaN(parsedDate.valueOf()) && parsedDate.toISOString().slice(0, 10) === date
@@ -535,6 +565,9 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
 
   if (!validDate || typeof merchant !== 'string' || !merchant.trim() || merchant.trim().length > 100) {
     return response.status(400).json({ error: '请填写有效日期和账单名称。' })
+  }
+  if (time !== null && (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) {
+    return response.status(400).json({ error: '时间格式无效。' })
   }
   if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || parsedAmount > 100000000) {
     return response.status(400).json({ error: '请输入有效金额。' })
@@ -546,6 +579,12 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   if (typeof note !== 'string' || note.length > 250) {
     return response.status(400).json({ error: '备注不能超过 250 个字符。' })
   }
+  if (typeof productName !== 'string' || productName.trim().length > 100) {
+    return response.status(400).json({ error: '商品名不能超过 100 个字符。' })
+  }
+  if (!Array.isArray(confirmedDuplicateIds) || !confirmedDuplicateIds.every((id) => Number.isSafeInteger(id) && id > 0)) {
+    return response.status(400).json({ error: '重复账单确认信息无效。' })
+  }
   const [payers] = await pool.execute(`
     SELECT a.display_name
     FROM group_members gm JOIN accounts a ON a.id = gm.user_id
@@ -555,16 +594,39 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   if (!payers.length) return response.status(400).json({ error: '付款人必须是群组成员。' })
 
   const amountCents = Math.round(parsedAmount * 100)
-  const [result] = await pool.execute(`
-    INSERT INTO expenses (entry_type, group_id, date, merchant, note, category, amount_cents, payer_user_id, payer, created_by)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [type, request.group.id, date, merchant.trim(), note.trim(), category, amountCents, payerUserId, payers[0].display_name, request.user.id])
-  const [rows] = await pool.execute(`
-    SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, e.merchant, e.note, e.category,
-      e.entry_type, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
-    FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id WHERE e.id = ?
-  `, [result.insertId])
-  response.status(201).json({ expense: serializeExpense(rows[0]) })
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
+    const [duplicates] = await connection.execute(`
+      SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time,
+        e.merchant, e.product_name, e.note, e.category, e.entry_type, e.amount_cents, e.payer_user_id,
+        COALESCE(a.display_name, e.payer) AS payer_name
+      FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id
+      WHERE e.group_id = ? AND e.date = ? AND e.entry_type = ? AND e.amount_cents = ?
+      ORDER BY e.id DESC
+    `, [request.group.id, date, type, amountCents])
+    if (duplicates.some((row) => !confirmedDuplicateIds.includes(row.id))) {
+      await connection.rollback()
+      return response.status(409).json({ code: 'POSSIBLE_DUPLICATE', error: '发现可能重复的账单，请确认是否继续。', duplicates: duplicates.map(serializeExpense) })
+    }
+    const [result] = await connection.execute(`
+      INSERT INTO expenses (entry_type, group_id, date, transaction_time, merchant, product_name, note, category, amount_cents, payer_user_id, payer, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [type, request.group.id, date, time, merchant.trim(), productName.trim(), note.trim(), category, amountCents, payerUserId, payers[0].display_name, request.user.id])
+    const [rows] = await connection.execute(`
+      SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
+        e.entry_type, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
+      FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id WHERE e.id = ?
+    `, [result.insertId])
+    await connection.commit()
+    response.status(201).json({ expense: serializeExpense(rows[0]) })
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally {
+    connection.release()
+  }
 })
 
 app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember, async (request, response) => {
@@ -576,6 +638,7 @@ app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember,
 })
 
 app.use((error, _request, response, _next) => {
+  if (error.type === 'entity.too.large') return response.status(413).json({ error: '上传内容过大，请选择不超过 4 MB 的图片。' })
   console.error(error)
   response.status(500).json({ error: '服务暂时不可用，请稍后重试。' })
 })

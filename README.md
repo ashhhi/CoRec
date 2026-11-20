@@ -25,7 +25,9 @@ Configure the server-side model in `.env`. The default values below match the Li
 
     docker compose up --build -d
 
-The browser stores chat history only. Model requests are relayed through the authenticated CoRec API, and the API key is read from the API container environment rather than sent by the browser or stored in the database. AI-generated expenses stay as drafts until a group member confirms them.
+The browser stores chat history only. Model requests are relayed through the authenticated CoRec API, and the API key is read from the API container environment rather than sent by the browser or stored in the database. Image-based entries are saved automatically when their required details are known; possible duplicates require confirmation. Text-based entries are saved after a group member confirms the draft.
+
+Chat supports one JPEG, PNG, WebP, or GIF image per message, up to 4 MB. The configured model and provider must support image input. Images remain in the current page session and are not saved in chat history; after a refresh, they must be uploaded again for the model to see them. If another reverse proxy is placed in front of CoRec, configure it to accept request bodies of at least 6 MB.
 
 To stop the services while keeping database contents:
 
