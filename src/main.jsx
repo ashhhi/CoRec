@@ -78,6 +78,7 @@ function App() {
   const [activePage, setActivePage] = useState('ledger')
   const [month, setMonth] = useState(() => localMonth(new Date()))
   const [transactions, setTransactions] = useState([])
+  const [groupBalance, setGroupBalance] = useState(0)
   const [typeFilter, setTypeFilter] = useState('all')
   const [activeFilter, setActiveFilter] = useState('全部')
   const [search, setSearch] = useState('')
@@ -108,6 +109,8 @@ function App() {
     const term = search.trim().toLowerCase()
     return matchesType && matchesFilter && (!term || `${item.merchant}${item.note}${item.category}${item.payer}`.toLowerCase().includes(term))
   })
+  const monthIncome = transactions.reduce((total, item) => total + (item.type === 'income' ? Number(item.amount) : 0), 0)
+  const monthExpense = transactions.reduce((total, item) => total + (item.type === 'income' ? 0 : Number(item.amount)), 0)
 
   async function loadProfile(preferredGroupId = null) {
     const response = await fetch('/api/auth/me')
@@ -150,6 +153,7 @@ function App() {
   async function loadLedger(monthToLoad = month) {
     if (!user || !activeGroupId) {
       setTransactions([])
+      setGroupBalance(0)
       setLoading(false)
       return
     }
@@ -159,6 +163,7 @@ function App() {
       const response = await fetch(`/api/groups/${activeGroupId}/ledger?month=${encodeURIComponent(monthToLoad)}`)
       const data = await readJson(response)
       setTransactions(data.expenses)
+      setGroupBalance(Number(data.balance) || 0)
     } catch (loadError) {
       setError(loadError.message || '无法连接账本服务。')
       if (loadError.message.includes('登录')) setUser(null)
@@ -286,6 +291,12 @@ function App() {
           <span className="view-label"><span className="live-dot" />{activeGroup?.name}</span>
         </section>
 
+        <section className="balance-summary" aria-label="账本余额">
+          <div className="balance-primary"><span>累计结余</span><strong className={groupBalance < 0 ? 'negative-balance' : ''}>{groupBalance < 0 ? '− ' : ''}¥{formatMoney(Math.abs(groupBalance))}</strong><small>累计收入减累计支出</small></div>
+          <div className="balance-stat"><span>本月收入</span><strong className="income-text">+ ¥{formatMoney(monthIncome)}</strong></div>
+          <div className="balance-stat"><span>本月支出</span><strong>− ¥{formatMoney(monthExpense)}</strong></div>
+        </section>
+
         <section className="ledger-section panel">
           <div className="section-header"><div><h2>账单明细</h2><p>{activeGroup?.name} 的共同账单</p></div><span className="ledger-count">{transactions.length} 笔</span></div>
           {error && <div className="error-banner" role="alert">{error}</div>}
@@ -303,6 +314,7 @@ function App() {
           </div>
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
+        <LedgerCharts groupId={activeGroupId} month={month} />
         </> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={() => loadLedger(month)} />}
       </main>
 
@@ -336,6 +348,180 @@ function TransactionRow({ item, today, onDelete }) {
   const initials = item.payer?.slice(0, 1) || '?'
   const title = item.merchant === item.category ? item.category : item.merchant
   return <div className={`transaction-row ${isIncome ? 'income-row' : ''}`}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-copy"><strong>{title}</strong><span>{item.note || (isIncome ? '共同收入' : '共同开销')}</span></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isIncome ? 'transaction-amount income' : 'transaction-amount'}>{isIncome ? '+' : '−'} ¥{formatMoney(item.amount)}</strong><button className="row-more" aria-label={`${title}删除账单`} onClick={() => onDelete(item.id)} title="删除账单"><Trash2 size={16} /></button></div>
+}
+
+function monthEnd(month) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate()
+  return `${month}-${String(lastDay).padStart(2, '0')}`
+}
+
+function addUtcDays(value, days) {
+  const date = new Date(`${value}T00:00:00Z`)
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
+function makeBuckets(from, to, granularity) {
+  let cursor = from
+  if (granularity === 'week') {
+    const weekday = (new Date(`${from}T00:00:00Z`).getUTCDay() + 6) % 7
+    cursor = addUtcDays(from, -weekday)
+  } else if (granularity === 'month') {
+    cursor = `${from.slice(0, 7)}-01`
+  }
+  const buckets = []
+  while (cursor <= to) {
+    buckets.push(cursor)
+    if (granularity === 'day') cursor = addUtcDays(cursor, 1)
+    else if (granularity === 'week') cursor = addUtcDays(cursor, 7)
+    else {
+      const date = new Date(`${cursor}T00:00:00Z`)
+      date.setUTCMonth(date.getUTCMonth() + 1)
+      cursor = date.toISOString().slice(0, 10)
+    }
+  }
+  return buckets
+}
+
+function formatBucketLabel(value, granularity) {
+  if (granularity === 'month') return value.slice(0, 7).replace('-', '/')
+  const date = new Date(`${value}T00:00:00Z`)
+  return `${date.getUTCMonth() + 1}/${date.getUTCDate()}`
+}
+
+function formatAxisMoney(value) {
+  if (value >= 100000) return `${Math.round(value / 10000)}万`
+  if (value >= 10000) return `${(value / 10000).toFixed(1)}万`
+  return Math.round(value).toLocaleString('zh-CN')
+}
+
+function PieChart({ categories, total }) {
+  const slices = categories.map((item) => ({ ...item, color: categoryMeta[item.category]?.color || '#9ba69e' }))
+  let angle = -90
+  const paths = slices.map((slice) => {
+    const sweep = slice.amount / total * 360
+    const start = angle * Math.PI / 180
+    const end = (angle + sweep) * Math.PI / 180
+    angle += sweep
+    const outerStart = [110 + 86 * Math.cos(start), 110 + 86 * Math.sin(start)]
+    const outerEnd = [110 + 86 * Math.cos(end), 110 + 86 * Math.sin(end)]
+    const innerEnd = [110 + 50 * Math.cos(end), 110 + 50 * Math.sin(end)]
+    const innerStart = [110 + 50 * Math.cos(start), 110 + 50 * Math.sin(start)]
+    const largeArc = sweep > 180 ? 1 : 0
+    return { ...slice, d: `M ${outerStart[0]} ${outerStart[1]} A 86 86 0 ${largeArc} 1 ${outerEnd[0]} ${outerEnd[1]} L ${innerEnd[0]} ${innerEnd[1]} A 50 50 0 ${largeArc} 0 ${innerStart[0]} ${innerStart[1]} Z` }
+  })
+  return <div className="pie-chart-wrap">
+    <svg className="pie-chart" viewBox="0 0 220 220" role="img" aria-label={`支出分类总额 ¥${formatMoney(total)}`}>
+      {slices.length === 1 ? <><circle cx="110" cy="110" r="86" fill={slices[0].color} /><circle cx="110" cy="110" r="50" fill="#fffefa" /></> : paths.map((slice) => <path key={slice.category} d={slice.d} fill={slice.color} stroke="#fffefa" strokeWidth="2"><title>{slice.category} ¥{formatMoney(slice.amount)}</title></path>)}
+      <text x="110" y="104" textAnchor="middle" className="pie-center-label">支出</text>
+      <text x="110" y="127" textAnchor="middle" className="pie-center-total">¥{formatMoney(total)}</text>
+    </svg>
+    <div className="pie-legend">{slices.map((slice) => <div className="pie-legend-row" key={slice.category}><span className="pie-legend-name"><i style={{ background: slice.color }} />{slice.category}</span><strong>¥{formatMoney(slice.amount)}</strong><small>{Math.round(slice.amount / total * 100)}%</small></div>)}</div>
+  </div>
+}
+
+function TrendChart({ timeline, from, to, granularity }) {
+  const buckets = makeBuckets(from, to, granularity)
+  const byDate = new Map(timeline.map((item) => [`${item.date}:${item.type}`, item.amount]))
+  const points = buckets.map((date) => ({
+    date,
+    income: byDate.get(`${date}:income`) || 0,
+    expense: byDate.get(`${date}:expense`) || 0,
+  }))
+  const maximum = Math.max(0, ...points.flatMap((item) => [item.income, item.expense]))
+  const roughStep = maximum / 4 || 1
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep))
+  const step = Math.ceil(roughStep / magnitude) * magnitude
+  const axisMaximum = step * 4
+  const left = 48
+  const right = 12
+  const top = 14
+  const bottom = 34
+  const width = 640 - left - right
+  const height = 230 - top - bottom
+  const pointAt = (index, value) => ({
+    x: left + (points.length > 1 ? index / (points.length - 1) : 0.5) * width,
+    y: top + (1 - value / axisMaximum) * height,
+  })
+  const seriesPoints = (key) => points.map((item, index) => pointAt(index, item[key]))
+  const incomePoints = seriesPoints('income')
+  const expensePoints = seriesPoints('expense')
+  const xLabels = [...new Set([0, Math.round((points.length - 1) / 4), Math.round((points.length - 1) / 2), Math.round((points.length - 1) * 3 / 4), points.length - 1])]
+  const hasData = timeline.length > 0
+  return <div className="trend-chart-wrap">
+    {!hasData ? <div className="chart-empty">所选时间范围没有收支记录</div> : <svg className="trend-chart" viewBox="0 0 640 230" role="img" aria-label={`按${granularity === 'day' ? '日' : granularity === 'week' ? '周' : '月'}统计的收入与支出`}>
+      {[0, 1, 2, 3, 4].map((tick) => {
+        const y = top + height * tick / 4
+        const value = axisMaximum * (4 - tick) / 4
+        return <g key={tick}><line x1={left} y1={y} x2={left + width} y2={y} className="chart-grid-line" /><text x={left - 8} y={y + 4} textAnchor="end" className="chart-axis-label">{formatAxisMoney(value)}</text></g>
+      })}
+      <polyline points={incomePoints.map((point) => `${point.x},${point.y}`).join(' ')} className="trend-line income-line" />
+      <polyline points={expensePoints.map((point) => `${point.x},${point.y}`).join(' ')} className="trend-line expense-line" />
+      {incomePoints.map((point, index) => <circle key={`i-${points[index].date}`} cx={point.x} cy={point.y} r="2.5" className="trend-point income-point"><title>{formatBucketLabel(points[index].date, granularity)} 收入 ¥{formatMoney(points[index].income)}</title></circle>)}
+      {expensePoints.map((point, index) => <circle key={`e-${points[index].date}`} cx={point.x} cy={point.y} r="2.5" className="trend-point expense-point"><title>{formatBucketLabel(points[index].date, granularity)} 支出 ¥{formatMoney(points[index].expense)}</title></circle>)}
+      {xLabels.map((index) => <text key={index} x={pointAt(index, 0).x} y={top + height + 23} textAnchor="middle" className="chart-axis-label">{formatBucketLabel(points[index].date, granularity)}</text>)}
+    </svg>}
+  </div>
+}
+
+function LedgerCharts({ groupId, month }) {
+  const [from, setFrom] = useState(`${month}-01`)
+  const [to, setTo] = useState(monthEnd(month))
+  const [granularity, setGranularity] = useState('day')
+  const [analytics, setAnalytics] = useState({ categories: [], timeline: [] })
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const rangeValid = Boolean(from && to && from <= to)
+
+  useEffect(() => {
+    if (!rangeValid) {
+      setError('结束日期需晚于或等于开始日期。')
+      return
+    }
+    let current = true
+    const query = new URLSearchParams({ from, to, granularity })
+    setLoading(true)
+    setError('')
+    fetch(`/api/groups/${groupId}/analytics?${query}`).then(async (response) => {
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || '加载统计数据失败。')
+      if (current) setAnalytics(data)
+    }).catch((loadError) => {
+      if (current) setError(loadError.message || '加载统计数据失败。')
+    }).finally(() => {
+      if (current) setLoading(false)
+    })
+    return () => { current = false }
+  }, [groupId, from, to, granularity, rangeValid])
+
+  const categories = analytics.categories || []
+  const totalExpense = categories.reduce((sum, item) => sum + Number(item.amount), 0)
+  const monthLabel = `${from} 至 ${to}`
+  return <section className="analytics-section" aria-label="收支统计">
+    <div className="analytics-toolbar">
+      <div><p className="eyebrow">LEDGER ANALYTICS</p><h2>收支统计</h2></div>
+      <div className="analytics-controls">
+        <div className="date-range-control">
+          <label><span>开始日期</span><input type="date" value={from} max={to || undefined} onChange={(event) => setFrom(event.target.value)} aria-label="统计开始日期" /></label>
+          <label><span>结束日期</span><input type="date" value={to} min={from || undefined} onChange={(event) => setTo(event.target.value)} aria-label="统计结束日期" /></label>
+        </div>
+        <div className="granularity-control" role="group" aria-label="时间颗粒度">{[['day', '日'], ['week', '周'], ['month', '月']].map(([value, label]) => <button type="button" key={value} className={granularity === value ? 'active' : ''} aria-pressed={granularity === value} onClick={() => setGranularity(value)}>{label}</button>)}</div>
+      </div>
+    </div>
+    {error && <div className="error-banner" role="alert">{error}</div>}
+    <div className={`chart-grid ${loading ? 'charts-loading' : ''}`}>
+      <article className="chart-panel">
+        <header className="chart-panel-heading"><div><h3>支出分类</h3><p>{monthLabel}</p></div><span>{categories.length} 类</span></header>
+        {totalExpense > 0 ? <PieChart categories={categories} total={totalExpense} /> : <div className="chart-empty">所选时间范围没有支出记录</div>}
+      </article>
+      <article className="chart-panel">
+        <header className="chart-panel-heading"><div><h3>收支趋势</h3><p>{monthLabel}</p></div><span>{granularity === 'day' ? '按日' : granularity === 'week' ? '按周' : '按月'}</span></header>
+        <div className="chart-legend"><span><i className="legend-income" />收入</span><span><i className="legend-expense" />支出</span></div>
+        <TrendChart timeline={analytics.timeline || []} from={from} to={to} granularity={granularity} />
+      </article>
+    </div>
+  </section>
 }
 
 createRoot(document.getElementById('root')).render(<App />)

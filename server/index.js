@@ -405,7 +405,7 @@ app.get('/api/groups/:groupId', requireAuth, requireGroupMember, async (request,
 app.get('/api/groups/:groupId/llm/config', requireAuth, requireGroupMember, (_request, response) => {
   const config = getLlmConfig()
   const configured = Boolean(config.baseUrl && config.apiKey && config.model && ['chat-completions', 'responses'].includes(config.apiFormat))
-  response.json({ configured, model: configured ? config.model : '' })
+  response.json({ configured })
 })
 
 app.post('/api/groups/:groupId/llm/chat', requireAuth, llmLimiter, requireGroupMember, async (request, response) => {
@@ -462,6 +462,44 @@ app.post('/api/groups/:groupId/llm/chat', requireAuth, llmLimiter, requireGroupM
   }
 })
 
+app.get('/api/groups/:groupId/analytics', requireAuth, requireGroupMember, async (request, response) => {
+  const { from, to, granularity = 'day' } = request.query
+  const isValidDate = (value) => {
+    if (typeof value !== 'string' || !datePattern.test(value)) return false
+    const date = new Date(`${value}T00:00:00Z`)
+    return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value
+  }
+  if (!isValidDate(from) || !isValidDate(to) || from > to) {
+    return response.status(400).json({ error: '统计日期范围无效。' })
+  }
+  if (!['day', 'week', 'month'].includes(granularity)) {
+    return response.status(400).json({ error: '统计时间颗粒度无效。' })
+  }
+  const bucketSql = granularity === 'month'
+    ? "DATE_FORMAT(e.date, '%Y-%m-01')"
+    : granularity === 'week'
+      ? "DATE_FORMAT(DATE_SUB(e.date, INTERVAL WEEKDAY(e.date) DAY), '%Y-%m-%d')"
+      : "DATE_FORMAT(e.date, '%Y-%m-%d')"
+  const [categoryRows] = await pool.execute(`
+    SELECT e.category, SUM(e.amount_cents) AS amount_cents
+    FROM expenses e
+    WHERE e.group_id = ? AND e.entry_type = 'expense' AND e.date >= ? AND e.date <= ?
+    GROUP BY e.category
+    ORDER BY amount_cents DESC
+  `, [request.group.id, from, to])
+  const [timelineRows] = await pool.execute(`
+    SELECT ${bucketSql} AS date, e.entry_type, SUM(e.amount_cents) AS amount_cents
+    FROM expenses e
+    WHERE e.group_id = ? AND e.date >= ? AND e.date <= ?
+    GROUP BY date, e.entry_type
+    ORDER BY date
+  `, [request.group.id, from, to])
+  response.json({
+    categories: categoryRows.map((row) => ({ category: row.category, amount: Number(row.amount_cents) / 100 })),
+    timeline: timelineRows.map((row) => ({ date: row.date, type: row.entry_type, amount: Number(row.amount_cents) / 100 })),
+  })
+})
+
 app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (request, response) => {
   const month = request.query.month
   if (typeof month !== 'string' || !monthPattern.test(month)) {
@@ -477,7 +515,15 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
     WHERE e.group_id = ? AND e.date >= ? AND e.date < ?
     ORDER BY e.date DESC, e.id DESC
   `, [request.group.id, `${month}-01`, nextMonth])
-  response.json({ expenses: rows.map(serializeExpense) })
+  const [balanceRows] = await pool.execute(`
+    SELECT COALESCE(SUM(CASE
+      WHEN entry_type = 'income' THEN amount_cents
+      ELSE -CAST(amount_cents AS SIGNED)
+    END), 0) AS balance_cents
+    FROM expenses
+    WHERE group_id = ?
+  `, [request.group.id])
+  response.json({ expenses: rows.map(serializeExpense), balance: Number(balanceRows[0].balance_cents) / 100 })
 })
 
 app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async (request, response) => {

@@ -87,7 +87,7 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [savingId, setSavingId] = useState('')
-  const [modelConfig, setModelConfig] = useState({ loading: true, configured: false, model: '' })
+  const [modelConfig, setModelConfig] = useState({ loading: true, configured: false })
   const [error, setError] = useState('')
   const bottomRef = useRef(null)
 
@@ -100,13 +100,13 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
 
   useEffect(() => {
     let current = true
-    setModelConfig({ loading: true, configured: false, model: '' })
+    setModelConfig({ loading: true, configured: false })
     fetch(`/api/groups/${groupId}/llm/config`).then(async (response) => {
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || '无法读取后端模型配置。')
       if (current) setModelConfig({ loading: false, ...data })
     }).catch((configError) => {
-      if (current) setModelConfig({ loading: false, configured: false, model: '', error: configError.message })
+      if (current) setModelConfig({ loading: false, configured: false, error: configError.message })
     })
     return () => { current = false }
   }, [groupId])
@@ -179,7 +179,7 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
   }
 
   return <section className="chat-page">
-    <header className="chat-header"><div><p className="eyebrow">COREC CHAT</p><h1>Chat</h1><p>{groupName} · 账单助手</p></div><div className="chat-controls"><span className="model-label">{modelConfig.loading ? '读取模型配置…' : modelConfig.configured ? modelConfig.model : '模型未配置'}</span><button className="icon-button" onClick={clearConversation} title="清空对话" aria-label="清空对话"><Trash2 size={17} /></button></div></header>
+    <header className="chat-header"><div><p className="eyebrow">COREC CHAT</p><h1>Chat</h1><p>{groupName} · 账单助手</p></div><div className="chat-controls"><button className="icon-button" onClick={clearConversation} title="清空对话" aria-label="清空对话"><Trash2 size={17} /></button></div></header>
     <div className="chat-thread">
       {!messages.length && <div className="chat-welcome"><div className="chat-welcome-icon"><Bot size={23} /></div><h2>今天这笔怎么记？</h2><p>描述金额、类型和成员，我会整理成账单草稿供你确认。</p><div className="chat-suggestions"><button onClick={() => setInput('刚才我和阿禾吃饭花了 168 元，记到餐饮里')}>晚餐 168 元，记到餐饮</button><button onClick={() => setInput('昨天我付了 36 元打车费，帮我记一笔')}>昨天打车 36 元</button><button onClick={() => setInput('我今天收到工资 8000 元，记一笔收入')}>收到工资 8000 元</button></div></div>}
       {messages.map((message) => {
