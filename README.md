@@ -29,6 +29,28 @@ The browser stores chat history only. Model requests are relayed through the aut
 
 Chat supports one JPEG, PNG, WebP, or GIF image per message, up to 4 MB. The configured model and provider must support image input. Images remain in the current page session and are not saved in chat history; after a refresh, they must be uploaded again for the model to see them. If another reverse proxy is placed in front of CoRec, configure it to accept request bodies of at least 6 MB.
 
+## QQ Private Chat Bot
+
+The optional `qqbot` service connects to the official QQ Bot WebSocket gateway and handles private messages. Register a bot in the QQ Open Platform, enable the bot's private-chat event and messaging permissions, and configure the platform to use WebSocket event delivery. QQ platform availability and bot approval are subject to its current rules.
+
+Set these values in `.env` (keep the app secret and internal token private):
+
+    QQ_BOT_APP_ID=your-app-id
+    QQ_BOT_CLIENT_SECRET=your-client-secret
+    QQ_BOT_INTERNAL_TOKEN=a-unique-random-secret-at-least-32-characters
+    TZ=Asia/Shanghai
+
+Generate a distinct internal token with `openssl rand -hex 32`. The API and bot receive the same token from `.env`; it grants the bot access to the internal accounting endpoints, so do not reuse a database password or share it. Configure the existing `LLM_*` values as well. The model must support image input to process QQ pictures.
+
+Start the bot alongside CoRec:
+
+    docker compose --profile qqbot up -d --build
+    docker compose --profile qqbot logs -f qqbot
+
+Log in to CoRec, select the desired group, open the group panel, and generate a QQ binding code. Send the bot `绑定 <code>` in a private chat within 10 minutes. A code works once; generating another invalidates the previous code. Each CoRec account can bind one QQ identity and one active group, and binding again replaces its existing mapping. You can remove the binding from the same group panel.
+
+Send a text message or one image to record an entry. The bot asks for missing details and saves complete entries. When another entry in the same group has the same date, type and amount, the bot lists possible duplicates and waits for `确认` or `取消`. Send `重新开始` to discard an unfinished conversation. QQ may deliver the same event more than once; processed message IDs are stored to prevent repeat processing. The bot stores unfinished conversation context, including its latest image, in MySQL for up to 24 hours; processed event hashes are retained for up to seven days. Completed conversations are cleared.
+
 To stop the services while keeping database contents:
 
     docker compose down

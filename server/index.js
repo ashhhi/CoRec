@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import bcrypt from 'bcryptjs'
@@ -90,6 +90,20 @@ function clearSession(response) {
 
 async function requireAuth(request, response, next) {
   try {
+    const internalToken = process.env.QQ_BOT_INTERNAL_TOKEN || ''
+    const suppliedToken = request.get('X-CoRec-Bot-Token') || ''
+    if (suppliedToken) {
+      if (request.method !== 'POST' || !/^\/api\/groups\/\d+\/(?:llm\/chat|expenses)$/.test(request.path)) return response.status(403).json({ error: '服务接口无权限。' })
+      const expected = Buffer.from(internalToken)
+      const supplied = Buffer.from(suppliedToken)
+      if (expected.length < 32 || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return response.status(401).json({ error: '服务认证失败。' })
+      const userId = Number(request.get('X-CoRec-Bot-User'))
+      if (!Number.isSafeInteger(userId) || userId < 1) return response.status(401).json({ error: '服务账号无效。' })
+      const [users] = await pool.execute('SELECT id, username, display_name FROM accounts WHERE id = ?', [userId])
+      if (!users.length) return response.status(401).json({ error: '服务账号无效。' })
+      request.user = { id: users[0].id, username: users[0].username, displayName: users[0].display_name }
+      return next()
+    }
     const token = request.cookies[cookieName]
     if (!token) return response.status(401).json({ error: '请先登录。' })
     const [rows] = await pool.execute(`
@@ -268,6 +282,26 @@ async function ensureSchema() {
   if (!indexes.some((index) => index.Key_name === 'expenses_group_date_idx')) {
     await pool.query('ALTER TABLE expenses ADD INDEX expenses_group_date_idx (group_id, date DESC, id DESC)')
   }
+  await pool.query(`CREATE TABLE IF NOT EXISTS qq_bind_codes (
+    code_hash CHAR(64) PRIMARY KEY, user_id INT UNSIGNED NOT NULL, group_id INT UNSIGNED NOT NULL,
+    expires_at DATETIME NOT NULL, INDEX qq_bind_expiry_idx (expires_at),
+    FOREIGN KEY (user_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
+  await pool.query(`CREATE TABLE IF NOT EXISTS qq_bindings (
+    openid VARCHAR(128) PRIMARY KEY, user_id INT UNSIGNED NOT NULL, group_id INT UNSIGNED NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY qq_binding_user_idx (user_id),
+    FOREIGN KEY (user_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
+  await pool.query(`CREATE TABLE IF NOT EXISTS qq_conversations (
+    openid VARCHAR(128) PRIMARY KEY, state JSON NOT NULL, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (openid) REFERENCES qq_bindings(openid) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
+  await pool.query(`CREATE TABLE IF NOT EXISTS qq_processed_messages (
+    message_hash CHAR(64) PRIMARY KEY, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX qq_processed_created_idx (created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
 }
 
 app.get('/api/health', async (_request, response) => {
@@ -408,6 +442,28 @@ app.get('/api/groups/:groupId', requireAuth, requireGroupMember, async (request,
     ORDER BY gm.joined_at, a.id
   `, [request.group.id])
   response.json({ group: { ...request.group, members } })
+})
+
+app.post('/api/groups/:groupId/qq/bind-code', requireAuth, requireGroupMember, async (request, response) => {
+  if (request.get('X-CoRec-Bot-Token')) return response.status(403).json({ error: '请在网站上生成绑定码。' })
+  if ((process.env.QQ_BOT_INTERNAL_TOKEN || '').length < 32) return response.status(503).json({ error: 'QQ Bot 尚未配置。' })
+  const code = randomBytes(8).toString('hex').toUpperCase()
+  await pool.execute('DELETE FROM qq_bind_codes WHERE expires_at <= UTC_TIMESTAMP() OR user_id = ?', [request.user.id])
+  await pool.execute('INSERT INTO qq_bind_codes (code_hash, user_id, group_id, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE))', [tokenHash(code), request.user.id, request.group.id])
+  response.json({ code, expiresIn: 600 })
+})
+
+app.delete('/api/qq/binding', requireAuth, async (request, response) => {
+  if (request.get('X-CoRec-Bot-Token')) return response.status(403).json({ error: '请在网站上解除绑定。' })
+  await pool.execute('DELETE FROM qq_bindings WHERE user_id = ?', [request.user.id])
+  await pool.execute('DELETE FROM qq_bind_codes WHERE user_id = ?', [request.user.id])
+  response.json({ ok: true })
+})
+
+app.get('/api/qq/binding', requireAuth, async (request, response) => {
+  if (request.get('X-CoRec-Bot-Token')) return response.status(403).json({ error: '请在网站上查看绑定。' })
+  const [rows] = await pool.execute('SELECT b.group_id, g.name AS group_name FROM qq_bindings b JOIN ledger_groups g ON g.id = b.group_id WHERE b.user_id = ?', [request.user.id])
+  response.json({ binding: rows.length ? { groupId: rows[0].group_id, groupName: rows[0].group_name } : null })
 })
 
 app.get('/api/groups/:groupId/llm/config', requireAuth, requireGroupMember, (_request, response) => {

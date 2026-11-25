@@ -44,6 +44,8 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [qqBinding, setQqBinding] = useState(null)
+  const [qqCode, setQqCode] = useState('')
 
   useEffect(() => {
     if (!activeGroup) return
@@ -57,6 +59,44 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
     })
     return () => { current = false }
   }, [activeGroup?.id])
+
+  useEffect(() => {
+    if (!qqCode) return
+    let current = true
+    const refresh = window.setInterval(() => {
+      requestJson('/api/qq/binding').then(({ binding }) => { if (current) setQqBinding(binding) }).catch(() => {})
+    }, 5000)
+    const expiry = window.setTimeout(() => setQqCode(''), 10 * 60 * 1000)
+    return () => { current = false; window.clearInterval(refresh); window.clearTimeout(expiry) }
+  }, [qqCode])
+
+  useEffect(() => {
+    if (!activeGroup) return
+    let current = true
+    setQqCode('')
+    requestJson('/api/qq/binding').then(({ binding }) => { if (current) setQqBinding(binding) }).catch(() => {})
+    return () => { current = false }
+  }, [activeGroup?.id])
+
+  async function generateQqCode() {
+    setBusy(true)
+    setError('')
+    try {
+      const data = await requestJson(`/api/groups/${activeGroup.id}/qq/bind-code`, { method: 'POST' })
+      setQqCode(data.code)
+    } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
+  }
+
+  async function unbindQq() {
+    if (!window.confirm('确定解除 QQ 绑定吗？')) return
+    setBusy(true)
+    setError('')
+    try {
+      await requestJson('/api/qq/binding', { method: 'DELETE' })
+      setQqBinding(null)
+      setQqCode('')
+    } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
+  }
 
   async function submit(event) {
     event.preventDefault()
@@ -90,6 +130,7 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
 
   const content = <>
     <div className="group-panel-heading"><div className="account-icon"><UsersRound size={20} /></div><div><p className="eyebrow">SHARED GROUP</p><h2>{activeGroup ? activeGroup.name : '加入一个群组'}</h2><p>{activeGroup ? `${members.length} 位成员 · ${user.displayName}` : '群组成员可以共同查看和记录账单。'}</p></div>{!fullScreen && <button className="close-button" onClick={onClose} aria-label="关闭"><X size={19} /></button>}</div>
+    {activeGroup && <div className="qq-binding"><div className="group-detail-heading"><span>QQ 私聊绑定</span>{qqBinding && <button type="button" className="copy-button" onClick={unbindQq} disabled={busy}>解除绑定</button>}</div><p>{qqBinding ? `已绑定账本：${qqBinding.groupName}` : '尚未绑定 QQ'}</p>{qqCode && <div className="qq-code"><strong>{qqCode}</strong><span>向机器人发送：绑定 {qqCode}，有效期 10 分钟</span></div>}<button type="button" className="add-profile-button qq-bind-button" onClick={generateQqCode} disabled={busy}>生成当前群组的绑定码</button></div>}
     {activeGroup && <div className="group-detail"><div className="group-detail-heading"><span>群组邀请码</span><button className="copy-button" onClick={copyInvite}><Copy size={15} />{copied ? '已复制' : '复制'}</button></div><div className="invite-code">{inviteCode}</div><div className="member-list">{members.map((member) => <div className="member-row" key={member.id}><span className={`avatar ${member.id === user.id ? 'avatar-coral' : 'avatar-blue'}`}>{member.displayName.slice(0, 1)}</span><span>{member.displayName}{member.id === user.id ? '（你）' : ''}</span><small>{member.role === 'owner' ? '创建者' : '成员'}</small></div>)}</div></div>}
     <div className="group-actions"><div className="mode-tabs"><button className={mode === 'join' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('join'); setError('') }}>加入群组</button><button className={mode === 'create' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('create'); setError('') }}>创建群组</button></div><form className="account-form" onSubmit={submit}>{mode === 'create' ? <label><span>群组名称</span><input name="name" maxLength="80" placeholder="例如：周末搭子" required /></label> : <label><span>邀请码</span><input name="inviteCode" autoCapitalize="characters" maxLength="16" placeholder="输入 16 位邀请码" required /></label>}{error && <div className="error-banner" role="alert">{error}</div>}<button className="primary-button account-submit" type="submit" disabled={busy}>{busy ? '请稍候…' : mode === 'create' ? '创建群组' : '加入群组'}</button></form></div>
   </>

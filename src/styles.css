@@ -92,6 +92,11 @@ button { border: 0; cursor: pointer; }
 .member-list { display: flex; flex-direction: column; gap: 11px; margin-top: 17px; padding-top: 13px; border-top: 1px solid #ece9e1; }
 .member-row { display: flex; align-items: center; gap: 8px; color: #57646a; font-size: 10px; }.member-row .avatar { border: 0; }.member-row small { margin-left: auto; color: #a0a8a2; font-size: 9px; }
 .group-actions { margin-top: 21px; }
+.qq-binding { margin-top: 18px; padding-top: 14px; border-top: 1px solid #ece9e1; }
+.qq-binding p { margin: 8px 0; color: #929b96; font-size: 10px; }
+.qq-code { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; color: #697772; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.qq-code strong { color: #394750; font-family: 'DM Mono', monospace; font-size: 15px; }
+.qq-bind-button { width: 100%; margin-top: 9px; }
 .mode-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; margin-bottom: 16px; border-radius: 7px; background: #f3f1eb; }
 .mode-tab { height: 31px; color: #8d9691; border-radius: 5px; background: transparent; font-size: 10px; }.mode-tab.active { color: #db6e55; background: #fffefa; box-shadow: 0 1px 3px rgba(42,50,48,.08); font-weight: 700; }
 @media (max-width: 760px) { .account-page { padding: 0 16px 28px; }.account-panel { margin-top: 12vh; padding: 23px 19px; }.setup-panel { margin-top: 8vh; }.group-panel { padding: 20px 17px; }.account-actions { gap: 7px; }.group-select-wrap { gap: 3px; }.group-select-wrap select { max-width: 120px; font-size: 10px; }.account-user { max-width: 72px; font-size: 10px; }.page-heading { padding-top: 28px; } }
