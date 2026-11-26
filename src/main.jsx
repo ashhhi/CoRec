@@ -222,7 +222,7 @@ function App() {
           date: form.get('date'),
           time: form.get('time') || null,
           merchant: form.get('category'),
-          productName: form.get('productName'),
+          productName: entryType === 'transfer' ? '' : form.get('productName') || '',
           note: form.get('note'),
           category: form.get('category'),
           amount: form.get('amount'),
@@ -413,9 +413,9 @@ function App() {
             <label><span>{entryType === 'transfer' ? '经办成员' : entryType === 'income' ? '收入归属' : '谁支付'}</span><select name="payerId" defaultValue={user.id}>{members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select></label>
             <label><span>日期</span><input name="date" type="date" defaultValue={today} required /></label>
             <label><span>时间</span><input name="time" type="time" defaultValue={`${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}`} required /></label>
-            <label><span>商品名 <em>选填</em></span><input name="productName" placeholder="输入商品名" maxLength="100" /></label>
+            {entryType !== 'transfer' && <label><span>商品名 <em>选填</em></span><input name="productName" placeholder="输入商品名" maxLength="100" /></label>}
           </div>
-          <label><span>备注 <em>选填</em></span><input name="note" placeholder={entryType === 'income' ? '补充收入说明' : '写点这笔支出的来由'} maxLength="250" /></label>
+          <label><span>备注 <em>选填</em></span><input name="note" placeholder={entryType === 'transfer' ? '补充转账说明' : entryType === 'income' ? '补充收入说明' : '写点这笔支出的来由'} maxLength="250" /></label>
           {error && <div className="error-banner" role="alert">{error}</div>}
           <button className="primary-button modal-submit" type="submit" disabled={saving || !members.length}><Plus size={18} />{saving ? '保存中…' : entryType === 'transfer' ? '保存账户转账' : entryType === 'income' ? '保存这笔收入' : '保存这笔支出'}</button>
         </form>
