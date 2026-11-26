@@ -22,8 +22,10 @@ import {
   Utensils,
   X,
 } from 'lucide-react'
-import { AuthScreen, GroupPanel } from './AccountViews.jsx'
+import { AuthScreen, GroupAddMenu, GroupEntryDialog, GroupPanel } from './AccountViews.jsx'
 import ChatPage from './ChatPage.jsx'
+import LedgerColumnFilter from './LedgerColumnFilter.jsx'
+import { filterLedger, ledgerMemberOptions } from './ledgerFilters.js'
 import { describeDuplicate, saveExpense } from './expenseApi.js'
 import './styles.css'
 
@@ -83,13 +85,15 @@ function App() {
   const [transactions, setTransactions] = useState([])
   const [groupBalance, setGroupBalance] = useState(0)
   const [typeFilter, setTypeFilter] = useState('all')
-  const [activeFilter, setActiveFilter] = useState('全部')
+  const [selectedCategories, setSelectedCategories] = useState(null)
+  const [selectedMembers, setSelectedMembers] = useState(null)
   const [search, setSearch] = useState('')
   const [showModal, setShowModal] = useState(false)
   const [selectedTransaction, setSelectedTransaction] = useState(null)
   const [entryType, setEntryType] = useState('expense')
   const [entryCategory, setEntryCategory] = useState('餐饮')
   const [showGroupPanel, setShowGroupPanel] = useState(false)
+  const [groupEntryMode, setGroupEntryMode] = useState(null)
   const [showProfilePanel, setShowProfilePanel] = useState(false)
   const [profileName, setProfileName] = useState('')
   const [profileError, setProfileError] = useState('')
@@ -109,12 +113,9 @@ function App() {
       ? Object.keys(categoryMeta)
       : [...Object.keys(categoryMeta), ...incomeCategories]
   const monthLabel = new Date(`${selectedMonth}-01T12:00:00`).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' })
-  const visibleTransactions = transactions.filter((item) => {
-    const matchesType = typeFilter === 'all' || item.type === typeFilter
-    const matchesFilter = activeFilter === '全部' || item.category === activeFilter
-    const term = search.trim().toLowerCase()
-    return matchesType && matchesFilter && (!term || (item.productName || '').toLowerCase().includes(term))
-  })
+  const memberOptions = ledgerMemberOptions(members, transactions)
+  const visibleTransactions = filterLedger(transactions, { type: typeFilter, categories: selectedCategories, members: selectedMembers, search })
+  const hasColumnFilters = selectedCategories !== null || selectedMembers !== null
   const monthIncome = transactions.reduce((total, item) => total + (item.type === 'income' ? Number(item.amount) : 0), 0)
   const monthExpense = transactions.reduce((total, item) => total + (item.type === 'income' ? 0 : Number(item.amount)), 0)
 
@@ -140,6 +141,11 @@ function App() {
   useEffect(() => {
     loadProfile().catch((loadError) => setError(loadError.message)).finally(() => setAuthLoading(false))
   }, [])
+
+  useEffect(() => {
+    setSelectedCategories(null)
+    setSelectedMembers(null)
+  }, [activeGroupId])
 
   useEffect(() => {
     if (!user || !activeGroupId) {
@@ -283,9 +289,13 @@ function App() {
 
   function selectTransactionType(type) {
     if (type === typeFilter) return
-    const categories = type === 'income' ? incomeCategories : Object.keys(categoryMeta)
-    if (type !== 'all' && !categories.includes(activeFilter)) setActiveFilter('全部')
+    setSelectedCategories(null)
     setTypeFilter(type)
+  }
+
+  function closeGroupEntry() {
+    setGroupEntryMode(null)
+    document.getElementById('group-add-trigger')?.focus()
   }
 
   if (authLoading) return <main className="account-page"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><div className="account-loading">正在连接 CoRec…</div></main>
@@ -298,7 +308,14 @@ function App() {
         <header className="topbar">
           <div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div>
           <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button></nav>
-          <div className="account-actions"><label className="group-select-wrap"><UsersRound size={16} /><select aria-label="切换群组" value={activeGroupId || ''} onChange={(event) => setActiveGroupId(Number(event.target.value))}>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label><button className="icon-button" title="群组与邀请码" aria-label="群组与邀请码" onClick={() => setShowGroupPanel(true)}><UsersRound size={18} /></button><span className="account-user" title={user.username}>{user.displayName}</span><button className="icon-button" title="修改个人名字" aria-label="修改个人名字" onClick={() => { setProfileName(user.displayName); setProfileError(''); setShowProfilePanel(true) }}><UserRound size={18} /></button><button className="icon-button" title="退出登录" aria-label="退出登录" onClick={logout}><LogOut size={18} /></button></div>
+          <div className="account-actions">
+            <label className="group-select-wrap"><select aria-label="切换群组" value={activeGroupId || ''} onChange={(event) => setActiveGroupId(Number(event.target.value))}>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
+            <button type="button" className="icon-button" title="群组设置" aria-label="群组设置" onClick={() => setShowGroupPanel(true)}><UsersRound size={18} /></button>
+            <GroupAddMenu onSelect={setGroupEntryMode} />
+            <span className="account-user" title={user.username}>{user.displayName}</span>
+            <button type="button" className="icon-button" title="修改个人名字" aria-label="修改个人名字" onClick={() => { setProfileName(user.displayName); setProfileError(''); setShowProfilePanel(true) }}><UserRound size={18} /></button>
+            <button type="button" className="icon-button" title="退出登录" aria-label="退出登录" onClick={logout}><LogOut size={18} /></button>
+          </div>
         </header>
 
         {activePage === 'ledger' ? <>
@@ -318,7 +335,7 @@ function App() {
         </section>
 
         <section className="ledger-section panel">
-          <div className="section-header"><div><h2>账单明细</h2><p>{activeGroup?.name} 的共同账单</p></div><span className="ledger-count">{transactions.length} 笔</span></div>
+          <div className="section-header"><div><h2>账单明细</h2><p>{activeGroup?.name} 的共同账单</p></div><span className="ledger-count" aria-live="polite">{visibleTransactions.length === transactions.length ? `${transactions.length} 笔` : `${visibleTransactions.length} / ${transactions.length} 笔`}</span></div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           <div className="ledger-controls">
             <div className="ledger-filter-group">
@@ -327,13 +344,13 @@ function App() {
                   <button type="button" key={value} className="filter-tab" aria-pressed={typeFilter === value} onClick={() => selectTransactionType(value)}>{label}</button>
                 ))}
               </div>
-              <label className="category-filter"><span>分类</span><select value={activeFilter} onChange={(event) => setActiveFilter(event.target.value)}><option value="全部">全部分类</option>{filterCategories.map((category) => <option key={category}>{category}</option>)}</select></label>
+              {hasColumnFilters && <button type="button" className="clear-ledger-filters" onClick={() => { setSelectedCategories(null); setSelectedMembers(null) }}>清除分类与成员筛选</button>}
             </div>
             <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="按商品名筛选" aria-label="按商品名筛选" /></label>
           </div>
           <div className="transactions-list">
-            <div className="transaction-header" aria-hidden="true"><span>日期</span><span className="transaction-header-icon" /><span>分类</span><span>商品</span><span>商家</span><span>成员</span><span className="transaction-header-amount">金额</span><span /></div>
-            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>换个关键词或分类试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
+            <div className="transaction-header"><span>日期</span><span className="transaction-header-icon" /><LedgerColumnFilter key={`category:${activeGroupId}:${typeFilter}`} label="分类" options={filterCategories.map((category) => ({ value: category, label: category }))} selected={selectedCategories} onChange={setSelectedCategories} /><span>商品</span><span>商家</span><LedgerColumnFilter key={`member:${activeGroupId}`} label="成员" options={memberOptions} selected={selectedMembers} onChange={setSelectedMembers} align="right" /><span className="transaction-header-amount">金额</span><span /></div>
+            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>调整分类、成员或商品名筛选试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
           </div>
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
@@ -361,6 +378,7 @@ function App() {
         </form>
       </div>}
       {showGroupPanel && <GroupPanel user={user} groups={groups} activeGroup={activeGroup} onChanged={async (group) => { await loadProfile(group?.id) }} onClose={() => setShowGroupPanel(false)} />}
+      {groupEntryMode && <GroupEntryDialog key={groupEntryMode} mode={groupEntryMode} groups={groups} onChanged={async (group) => { await loadProfile(group?.id) }} onClose={closeGroupEntry} />}
       {showProfilePanel && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowProfilePanel(false)}><section className="group-panel profile-modal"><div className="group-panel-heading"><div className="account-icon"><UserRound size={20} /></div><div><p className="eyebrow">PERSONAL PROFILE</p><h2>修改个人名字</h2><p>这个名字会显示在群组成员和账单中。</p></div><button className="close-button" onClick={() => setShowProfilePanel(false)} aria-label="关闭"><X size={19} /></button></div><form className="account-form profile-form" onSubmit={updateDisplayName}><label><span>名字</span><input value={profileName} onChange={(event) => setProfileName(event.target.value)} minLength="1" maxLength="32" autoComplete="name" required /></label>{profileError && <div className="error-banner" role="alert">{profileError}</div>}<button className="primary-button account-submit" type="submit" disabled={profileSaving}>{profileSaving ? '保存中…' : '保存名字'}</button></form></section></div>}
     </div>
   )

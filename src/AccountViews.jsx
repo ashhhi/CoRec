@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react'
-import { Copy, KeyRound, UsersRound, X } from 'lucide-react'
+import { Copy, KeyRound, Plus, UserPlus, UsersRound, X } from 'lucide-react'
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, {
@@ -322,8 +322,124 @@ function GroupAccessInbox({ groups, onChanged, revision }) {
 
 const groupRoleLabels = { owner: '群主', admin: '管理员', member: '成员' }
 
+export function GroupAddMenu({ onSelect }) {
+  const [open, setOpen] = useState(false)
+  const root = useRef(null)
+  const trigger = useRef(null)
+  const id = useId()
+
+  useEffect(() => {
+    if (!open) return
+    root.current?.querySelector('[role="menuitem"]')?.focus()
+    const outside = (event) => { if (!root.current?.contains(event.target)) setOpen(false) }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('focusin', outside)
+    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('focusin', outside) }
+  }, [open])
+
+  function choose(mode) {
+    setOpen(false)
+    trigger.current?.focus()
+    onSelect(mode)
+  }
+
+  function keydown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setOpen(false)
+      trigger.current?.focus()
+    } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault()
+      if (!open) { setOpen(true); return }
+      const items = [...root.current.querySelectorAll('[role="menuitem"]')]
+      const index = items.indexOf(document.activeElement)
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length
+      items[next]?.focus()
+    }
+  }
+
+  return <div ref={root} className="group-add-menu" onKeyDown={keydown}>
+    <button ref={trigger} id="group-add-trigger" type="button" className="icon-button" title="创建或加入群组" aria-label="创建或加入群组" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined} onClick={() => setOpen((value) => !value)}><Plus size={19} /></button>
+    {open && <div id={id} className="group-add-options" role="menu" aria-label="群组操作">
+      <button type="button" role="menuitem" onClick={() => choose('create')}><Plus size={16} />创建群组</button>
+      <button type="button" role="menuitem" onClick={() => choose('join')}><UserPlus size={16} />加入群组</button>
+    </div>}
+  </div>
+}
+
+function GroupEntryForm({ groups, onChanged, onClose, initialMode = 'join', showTabs = false }) {
+  const [mode, setMode] = useState(initialMode)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [revision, setRevision] = useState(0)
+
+  async function submit(event) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    setNotice('')
+    const form = new FormData(event.currentTarget)
+    const creating = mode === 'create'
+    try {
+      const data = await requestJson(creating ? '/api/groups' : '/api/groups/join', {
+        method: 'POST', body: JSON.stringify(creating ? { name: form.get('name') } : { inviteCode: form.get('inviteCode') }),
+      })
+      if (creating) {
+        await onChanged(data.group)
+        onClose?.()
+      } else {
+        setNotice(`已向「${data.request.groupName}」提交申请，等待群主或管理员审批。`)
+        setRevision((value) => value + 1)
+      }
+    } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
+  }
+
+  return <>
+    <div className="group-entry-form">
+      {showTabs && <div className="mode-tabs" role="group" aria-label="创建或加入群组">
+        {[['join', '加入群组'], ['create', '创建群组']].map(([value, label]) => <button key={value} type="button" className={`mode-tab${mode === value ? ' active' : ''}`} aria-pressed={mode === value} onClick={() => { setMode(value); setError(''); setNotice('') }}>{label}</button>)}
+      </div>}
+      {mode === 'join' && <p className="group-help">输入邀请码提交入群申请，由群主或管理员审批后加入。</p>}
+      <form className="account-form" onSubmit={submit}>
+        {mode === 'create' ? <label><span>群组名称</span><input key="name" name="name" maxLength="80" placeholder="例如：周末搭子" autoFocus required /></label> : <label><span>邀请码</span><input key="inviteCode" name="inviteCode" autoCapitalize="characters" maxLength="16" placeholder="输入 16 位邀请码" autoFocus required /></label>}
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        {notice && <div className="success-banner" role="status">{notice}</div>}
+        <button type="submit" className="primary-button account-submit" disabled={busy}>{busy ? '请稍候…' : mode === 'create' ? '创建群组' : '提交入群申请'}</button>
+      </form>
+    </div>
+    <GroupAccessInbox groups={groups} onChanged={onChanged} revision={revision} />
+  </>
+}
+
+export function GroupEntryDialog({ mode, groups, onChanged, onClose }) {
+  const titleId = useId()
+  const dialog = useRef(null)
+  useEffect(() => {
+    const keydown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onClose()
+      } else if (event.key === 'Tab') {
+        const focusable = [...dialog.current.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]')]
+        const first = focusable[0]
+        const last = focusable.at(-1)
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+      }
+    }
+    document.addEventListener('keydown', keydown)
+    return () => document.removeEventListener('keydown', keydown)
+  }, [onClose])
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+    <section ref={dialog} className="group-panel group-modal group-entry-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div className="group-panel-heading"><div><p className="eyebrow">SHARED GROUP</p><h2 id={titleId}>{mode === 'create' ? '创建群组' : '加入群组'}</h2></div><button type="button" className="close-button" onClick={onClose} aria-label="关闭"><X size={19} /></button></div>
+      <GroupEntryForm groups={groups} onChanged={onChanged} onClose={onClose} initialMode={mode} />
+    </section>
+  </div>
+}
+
 export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, fullScreen = false }) {
-  const [mode, setMode] = useState('join')
   const [members, setMembers] = useState([])
   const [membersError, setMembersError] = useState('')
   const [inviteCode, setInviteCode] = useState(activeGroup?.inviteCode || '')
@@ -393,32 +509,6 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
       window.removeEventListener('focus', refresh)
     }
   }, [activeGroup?.id, revision])
-
-  async function submit(event) {
-    event.preventDefault()
-    setBusy(true)
-    setError('')
-    setNotice('')
-    const form = new FormData(event.currentTarget)
-    const creating = mode === 'create'
-    try {
-      const data = await requestJson(creating ? '/api/groups' : '/api/groups/join', {
-        method: 'POST',
-        body: JSON.stringify(creating ? { name: form.get('name') } : { inviteCode: form.get('inviteCode') }),
-      })
-      if (creating) {
-        await onChanged(data.group)
-        if (!fullScreen) onClose()
-      } else {
-        setNotice(`已向「${data.request.groupName}」提交申请，等待群主或管理员审批。`)
-        setRevision((value) => value + 1)
-      }
-    } catch (requestError) {
-      setError(requestError.message)
-    } finally {
-      setBusy(false)
-    }
-  }
 
   async function manage(path, { method = 'POST', body, confirmation, success, leave = false, profile = false } = {}) {
     if (confirmation && !window.confirm(confirmation)) return
@@ -509,7 +599,7 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
         <div className="group-inline-actions"><button type="button" disabled={busy} onClick={() => manage(`/requests/${application.userId}`, { body: { action: 'approve' }, success: '申请已通过。' })}>通过</button><button type="button" className="is-danger" disabled={busy} onClick={() => manage(`/requests/${application.userId}`, { body: { action: 'reject' }, success: '申请已拒绝。' })}>拒绝</button></div>
       </div>)}
     </section>}
-    <GroupAccessInbox groups={groups} onChanged={onChanged} revision={revision} />
+    {activeGroup && <GroupAccessInbox groups={groups} onChanged={onChanged} revision={revision} />}
     {notice && <div className="success-banner" role="status">{notice}</div>}
     {error && <div className="error-banner" role="alert">{error}</div>}
     {activeGroup && <section className="group-lifecycle" aria-label="退出与群主管理">
@@ -523,7 +613,7 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
         <button type="button" className="group-danger-button" disabled={busy} onClick={() => manage('', { method: 'DELETE', confirmation: `解散「${activeGroup.name}」？所有成员将退出，该群组的全部账单、QQ 绑定、申请和邀请都会删除，无法恢复。`, leave: true })}>解散群组</button>
       </> : <button type="button" className="group-danger-button" disabled={busy} onClick={() => manage('/membership', { method: 'DELETE', confirmation: `退出「${activeGroup.name}」？你将失去账本访问权限，该群组的 QQ 绑定会解除，历史账单保留。`, leave: true })}>退出群组</button>}
     </section>}
-    <div className="group-actions"><div className="mode-tabs"><button className={mode === 'join' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('join'); setError('') }}>申请加入群组</button><button className={mode === 'create' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('create'); setError('') }}>创建群组</button></div><form className="account-form" onSubmit={submit}>{mode === 'create' ? <label><span>群组名称</span><input name="name" maxLength="80" placeholder="例如：周末搭子" required /></label> : <label><span>邀请码</span><input name="inviteCode" autoCapitalize="characters" maxLength="16" placeholder="输入 16 位邀请码" required /></label>}<button className="primary-button account-submit" type="submit" disabled={busy}>{busy ? '请稍候…' : mode === 'create' ? '创建群组' : '提交入群申请'}</button></form></div>
+    {!activeGroup && <GroupEntryForm groups={groups} onChanged={onChanged} showTabs />}
   </>
 
   if (fullScreen) return <main className="account-page"><header className="topbar"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><span className="account-user" title={user.username}>{user.displayName}</span></header><section className="group-panel account-panel setup-panel">{content}</section></main>
