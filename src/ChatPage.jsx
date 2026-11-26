@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Bot, Check, ImagePlus, Send, Trash2, X } from 'lucide-react'
 import { describeDuplicate, saveExpense } from './expenseApi.js'
+import { taskInstructions, taskTimeNow } from '../server/task-protocol.js'
+import { taskApi, formatTaskTime, taskKindLabels } from './tasksApi.js'
 
 const categories = ['餐饮', '交通', '娱乐', '购物', '居住', '其他']
 const incomeCategories = ['工资', '奖金', '退款', '其他收入']
@@ -61,10 +63,16 @@ function validateExpense(value, members, user) {
 async function parseExpense(messages, members, user, groupId) {
   const today = new Date()
   const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-  const systemPrompt = `你是 CoRec 的共同账本助手。今天是 ${todayIso}。当前群组成员：${members.map((member) => `${member.displayName} (id=${member.id})`).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。只返回一个 JSON 对象，不要 Markdown。格式：{"reply":"给用户的简短中文回复","expense":null}。用户上传图片时，默认用户希望提取图片中的账单并记账，除非用户明确提出其他用途。结合图片、文字和后续回答提取信息；若图片难以辨认，或收支类型、实际金额、日期、分类无法确定，直接向用户询问缺失信息，expense 必须为 null，不要猜测金额或日期。信息齐全后返回 expense 对象，字段为 {"type":"expense 或 income","date":"YYYY-MM-DD","time":"HH:mm 或 null","amount":数字,"category":"分类","merchant":"商家名称，可省略","productName":"商品名，可省略","note":"备注","payerName":"群组成员显示名字"}。商家名称和商品名分别填写；merchant 只能填写明确出现的实际商家名称，不能填消费描述，例如“和阿禾吃饭”或“打车”，此类描述可放在 note。不要将商家名称填入商品名；商品名不明确时留空。仅在图片或用户明确提供时间时填写 24 小时制 time，否则填 null。支出使用支出分类，收入使用收入分类；未提供商家名称时 merchant 可以省略。相对日期按今天换算。付款人或收入归属必须从群组成员中选择；未提成员时使用 ${user.displayName}。文本记账也要在信息不足时追问。不要声称账单已保存，系统会负责保存。`
+  const expensePrompt = `你是 CoRec 的共同账本助手。今天是 ${todayIso}。当前群组成员：${members.map((member) => `${member.displayName} (id=${member.id})`).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。只返回一个 JSON 对象，不要 Markdown。格式：{"reply":"给用户的简短中文回复","expense":null}。用户上传图片时，默认用户希望提取图片中的账单并记账，除非用户明确提出其他用途。结合图片、文字和后续回答提取信息；若图片难以辨认，或收支类型、实际金额、日期、分类无法确定，直接向用户询问缺失信息，expense 必须为 null，不要猜测金额或日期。信息齐全后返回 expense 对象，字段为 {"type":"expense 或 income","date":"YYYY-MM-DD","time":"HH:mm 或 null","amount":数字,"category":"分类","merchant":"商家名称，可省略","productName":"商品名，可省略","note":"备注","payerName":"群组成员显示名字"}。商家名称和商品名分别填写；merchant 只能填写明确出现的实际商家名称，不能填消费描述，例如“和阿禾吃饭”或“打车”，此类描述可放在 note。不要将商家名称填入商品名；商品名不明确时留空。仅在图片或用户明确提供时间时填写 24 小时制 time，否则填 null。支出使用支出分类，收入使用收入分类；未提供商家名称时 merchant 可以省略。相对日期按今天换算。付款人或收入归属必须从群组成员中选择；未提成员时使用 ${user.displayName}。文本记账也要在信息不足时追问。不要声称账单已保存，系统会负责保存。`
+  const systemPrompt = `${expensePrompt}\n${taskInstructions(taskTimeNow())}`
   const recent = messages.slice(-14)
   const lastImageId = [...recent].reverse().find((message) => message.image)?.id
   const inputMessages = [{ role: 'system', content: systemPrompt }, ...recent.map(({ id, role, content, image }) => ({ role, content: content || (image ? '请提取这张图片中的账单并记账；信息不足时询问缺失信息。' : ''), ...(id === lastImageId ? { image } : {}) }))]
+  let remaining = 4600 - systemPrompt.length
+  for (let index = inputMessages.length - 1; index > 0; index--) {
+    inputMessages[index].content = inputMessages[index].content.slice(0, Math.max(0, Math.min(remaining, index === inputMessages.length - 1 ? 2400 : 120)))
+    remaining -= inputMessages[index].content.length
+  }
   async function requestModel(input) {
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 60000)
@@ -91,7 +99,7 @@ async function parseExpense(messages, members, user, groupId) {
   const latestMessage = messages[messages.length - 1]
   const isImageOnly = Boolean(latestMessage?.image && !latestMessage.content.trim())
   const asksForInformation = (reply) => typeof reply === 'string' && /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(reply)
-  if (isImageOnly && !result.expense && !asksForInformation(result.reply)) {
+  if (isImageOnly && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && !asksForInformation(result.reply)) {
     const retryMessages = inputMessages.map((message, index) => index === 0 ? {
       ...message,
       content: `${message.content} 用户刚刚仅发送图片，即要求记账。不要只描述图片：如果图片中能确定收支类型、金额、日期及分类，必须在 expense 中填写这些字段；否则 reply 必须明确询问无法确定的字段，expense 为 null。`,
@@ -101,6 +109,7 @@ async function parseExpense(messages, members, user, groupId) {
       result.reply = `${typeof result.reply === 'string' ? `${result.reply}\n` : ''}请补充这笔账单的收支类型、金额、日期和分类，以便记账。`
     }
   }
+  if (result.intent === 'task' || result.task || result.taskAction) return { intent: 'task', reply: result.reply || '请补充任务内容和时间。', task: result.task, taskAction: result.taskAction }
   try {
     return { reply: typeof result.reply === 'string' ? result.reply : '我理解了。', expense: validateExpense(result.expense, members, user) }
   } catch (validationError) {
@@ -176,6 +185,13 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
     setLoading(true)
     try {
       const result = await parseExpense(nextMessages, members, user, groupId)
+      if (result.intent === 'task') {
+        if (result.taskAction) {
+          const { task } = await taskApi(groupId, '/action', { method: 'POST', body: result.taskAction })
+          setMessages((current) => [...current, { id: createId(), role: 'assistant', content: `任务 #${task.id} 已${task.status === 'completed' ? '完成' : '取消'}。` }])
+        } else setMessages((current) => [...current, { id: createId(), role: 'assistant', content: result.task ? '已整理好任务，请确认时间和内容后创建。' : result.reply, task: result.task || null }])
+        return
+      }
       const lastImageIndex = nextMessages.findLastIndex((message) => message.role === 'user' && message.image)
       const lastSavedIndex = nextMessages.findLastIndex((message) => message.expense?.saved || message.expense?.dismissed)
       if (result.expense && lastImageIndex > lastSavedIndex) {
@@ -221,6 +237,15 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
       : message))
   }
 
+  async function confirmTask(message) {
+    setSavingId(message.id)
+    setError('')
+    try {
+      const { task } = await taskApi(groupId, '', { method: 'POST', body: { ...message.task, requestId: message.id } })
+      setMessages((current) => current.map((item) => item.id === message.id ? { ...item, content: `已创建任务 #${task.id}，提醒及执行结果可在任务页面查看。`, task: { ...task, saved: true } } : item))
+    } catch (error) { setError(error.message) } finally { setSavingId('') }
+  }
+
   async function confirmExpense(message) {
     setSavingId(message.id)
     setError('')
@@ -248,9 +273,9 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
   }
 
   return <section className="chat-page">
-    <header className="chat-header"><div><p className="eyebrow">COREC CHAT</p><h1>Chat</h1><p>{groupName} · 账单助手</p></div><div className="chat-controls"><button className="icon-button" onClick={clearConversation} title="清空对话" aria-label="清空对话"><Trash2 size={17} /></button></div></header>
+    <header className="chat-header"><div><p className="eyebrow">COREC CHAT</p><h1>Chat</h1><p>{groupName} · 账单与任务助手</p></div><div className="chat-controls"><button className="icon-button" onClick={clearConversation} title="清空对话" aria-label="清空对话"><Trash2 size={17} /></button></div></header>
     <div className="chat-thread">
-      {!messages.length && <div className="chat-welcome"><div className="chat-welcome-icon"><Bot size={23} /></div><h2>今天这笔怎么记？</h2><p>描述金额、类型和成员，我会整理成账单草稿供你确认。</p><div className="chat-suggestions"><button onClick={() => setInput('刚才我和阿禾吃饭花了 168 元，记到餐饮里')}>晚餐 168 元，记到餐饮</button><button onClick={() => setInput('昨天我付了 36 元打车费，帮我记一笔')}>昨天打车 36 元</button><button onClick={() => setInput('我今天收到工资 8000 元，记一笔收入')}>收到工资 8000 元</button></div></div>}
+      {!messages.length && <div className="chat-welcome"><div className="chat-welcome-icon"><Bot size={23} /></div><h2>记账、任务，都可以告诉我</h2><p>发送账单，或告诉我什么时候提醒你、定时生成什么内容。</p><div className="chat-suggestions"><button onClick={() => setInput('明天下午3点提醒我交水电费，在群里提醒')}>明天下午3点提醒交水电费</button><button onClick={() => setInput('今晚8点自动汇总本月账本收支，在群里告诉我结果')}>今晚8点汇总本月收支</button><button onClick={() => setInput('刚才我和阿禾吃饭花了 168 元，记到餐饮里')}>晚餐 168 元，记到餐饮</button><button onClick={() => setInput('昨天我付了 36 元打车费，帮我记一笔')}>昨天打车 36 元</button><button onClick={() => setInput('我今天收到工资 8000 元，记一笔收入')}>收到工资 8000 元</button></div></div>}
       {messages.map((message) => {
         const isIncome = message.expense?.type === 'income'
         return <article className={`chat-message ${message.role}`} key={message.id}>
@@ -260,6 +285,14 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
             {message.image && <img className="chat-message-image" src={message.image} alt="上传的图片" />}
             {!message.image && message.hadImage && <p className="image-unavailable">图片未保存在本地</p>}
             {message.content && <p className="message-text">{message.content}</p>}
+            {message.task && <div className={message.task.saved ? 'expense-draft saved' : 'expense-draft'}>
+              <div className="draft-heading"><strong>{message.task.saved ? '已创建任务' : '任务草稿'}</strong><span>{taskKindLabels[message.task.kind] || '提醒事项'}</span></div>
+              <p>{message.task.title}</p>
+              <p>{formatTaskTime(message.task.dueAt)} · {message.task.target === 'private' ? 'QQ 私聊' : 'QQ 群'}</p>
+              {message.task.details && <p>{message.task.details}</p>}
+              {!message.task.saved && !message.task.dismissed && <div className="draft-actions"><button type="button" className="confirm-draft" disabled={savingId === message.id} onClick={() => confirmTask(message)}><Check size={14} />{savingId === message.id ? '正在创建…' : '确认创建任务'}</button><button type="button" onClick={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, task: { ...item.task, dismissed: true } } : item))}>取消</button></div>}
+              {message.task.dismissed && <p>已取消草稿</p>}
+            </div>}
             {message.expense && <div className={message.expense.saved ? 'expense-draft saved' : 'expense-draft'}>
               <div className="draft-heading"><strong>{message.expense.saved ? `已记入${isIncome ? '收入' : '支出'}` : message.expense.dismissed ? '已取消入账' : message.expense.duplicates ? '可能重复' : `待确认${isIncome ? '收入' : '支出'}`}</strong><span>{message.expense.category}</span></div>
               <div className="draft-main"><strong>{message.expense.productName || message.expense.merchant || message.expense.category}</strong><b className={isIncome ? 'income-amount' : ''}>{isIncome ? '+' : '−'} ¥{Number(message.expense.amount).toFixed(2)}</b></div>
@@ -271,14 +304,14 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
           </div>
         </article>
       })}
-      {loading && <div className="chat-typing"><span /><span /><span />正在整理账单…</div>}
+      {loading && <div className="chat-typing"><span /><span /><span />正在理解你的安排…</div>}
       <div ref={bottomRef} />
     </div>
     <div className="chat-compose-area">{error && <div className="error-banner" role="alert">{error}</div>}{!modelConfig.loading && !modelConfig.configured && <div className="chat-key-notice">{modelConfig.error || '后端尚未配置模型，请在 .env 中填写 LLM_BASE_URL、LLM_API_KEY、LLM_MODEL 和 LLM_API_FORMAT。'}</div>}
       <form className="chat-compose" onSubmit={sendMessage}>
         <input ref={imageInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" onChange={selectImage} hidden />
         {image && <div className="chat-image-preview"><img src={image} alt="待发送图片" /><button type="button" onClick={() => setImage('')} aria-label="移除图片" title="移除图片"><X size={15} /></button></div>}
-        <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form.requestSubmit() } }} placeholder="描述你要记录的账单…" rows={2} disabled={!modelConfig.configured || modelConfig.loading || loading} />
+        <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form.requestSubmit() } }} placeholder="描述账单，或告诉我什么时候做什么…" rows={2} disabled={!modelConfig.configured || modelConfig.loading || loading} />
         <div className="chat-compose-actions"><button className="attach-button" type="button" onClick={() => imageInputRef.current?.click()} disabled={!modelConfig.configured || modelConfig.loading || loading || readingImage} aria-label="添加图片" title="添加图片"><ImagePlus size={19} /></button><button className="send-button" type="submit" aria-label="发送" title="发送" disabled={(!input.trim() && !image) || readingImage || loading || !modelConfig.configured || modelConfig.loading}><Send size={18} /></button></div>
       </form><p className="chat-disclaimer">图片账单信息完整时自动入账，发现可能重复时需要确认。</p></div>
 

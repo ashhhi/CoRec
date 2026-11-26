@@ -8,6 +8,8 @@ import { rateLimit } from 'express-rate-limit'
 import mysql from 'mysql2/promise'
 import { claimGroupBinding, ensureQqGroupSchema, getGroupBinding, getGroupBindingStatus, groupCodePattern, qqOpenidPattern, removeGroupBinding } from './qq-group.js'
 import { ensureGroupSchema, GroupError, managesGroup, registerGroupRoutes } from './groups.js'
+import { ensureTaskSchema, registerTaskRoutes, startTaskWorker } from './tasks.js'
+import { sendTaskNotification } from './qq-api.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -95,7 +97,7 @@ async function requireAuth(request, response, next) {
     const internalToken = process.env.QQ_BOT_INTERNAL_TOKEN || ''
     const suppliedToken = request.get('X-CoRec-Bot-Token') || ''
     if (suppliedToken) {
-      if (request.method !== 'POST' || !/^\/api\/groups\/\d+\/(?:llm\/chat|expenses)$/.test(request.path)) return response.status(403).json({ error: '服务接口无权限。' })
+      if (request.method !== 'POST' || !/^\/api\/groups\/\d+\/(?:llm\/chat|expenses|tasks|tasks\/action)$/.test(request.path)) return response.status(403).json({ error: '服务接口无权限。' })
       const expected = Buffer.from(internalToken)
       const supplied = Buffer.from(suppliedToken)
       if (expected.length < 32 || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return response.status(401).json({ error: '服务认证失败。' })
@@ -322,6 +324,7 @@ async function ensureSchema() {
     INDEX qq_processed_created_idx (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
   await ensureQqGroupSchema(pool)
+  await ensureTaskSchema(pool)
 }
 
 app.get('/api/health', async (_request, response) => {
@@ -440,6 +443,7 @@ app.post('/api/groups', requireAuth, async (request, response) => {
 })
 
 registerGroupRoutes(app, { pool, requireAuth, invitePattern, usernamePattern })
+registerTaskRoutes(app, { pool, requireAuth, requireGroupMember })
 
 app.get('/api/groups/:groupId', requireAuth, requireGroupMember, async (request, response) => {
   const [members] = await pool.execute(`
@@ -784,6 +788,7 @@ app.use((error, _request, response, _next) => {
 })
 
 async function shutdown() {
+  await stopTaskWorker()
   server.close(async () => {
     await pool.end()
     process.exit(0)
@@ -793,6 +798,24 @@ async function shutdown() {
 await ensureSchema()
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`CoRec API listening on port ${port}`)
+})
+const stopTaskWorker = startTaskWorker(pool, {
+  send: sendTaskNotification,
+  generate: async (messages) => {
+    const config = getLlmConfig()
+    if (!config.apiKey || !config.model || !['responses', 'chat-completions'].includes(config.apiFormat)) throw new Error('模型尚未配置。')
+    const endpoint = await getPublicModelEndpoint(config.baseUrl, config.apiFormat)
+    const response = await fetch(endpoint, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(60000),
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+      body: JSON.stringify(config.apiFormat === 'responses' ? { model: config.model, input: messages } : { model: config.model, messages, temperature: 0.1 }),
+    })
+    if (!response.ok) throw new Error(`自动任务模型请求失败（${response.status}）。`)
+    const body = await response.text()
+    if (body.length > 100000) throw new Error('自动任务模型返回内容过大。')
+    const data = JSON.parse(body)
+    return data.output_text || data.output?.flatMap((item) => item.content || []).map((item) => item.text || '').join('\n') || data.choices?.[0]?.message?.content
+  },
 })
 
 process.on('SIGTERM', shutdown)

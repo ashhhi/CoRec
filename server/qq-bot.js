@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import mysql from 'mysql2/promise'
+import { qqToken, qqRequest } from './qq-api.js'
+import { taskInstructions, taskTimeNow } from './task-protocol.js'
 import { confirmGroupBinding, getGroupBinding, qqOpenidPattern, requestGroupBinding } from './qq-group.js'
 
 const appId = process.env.QQ_BOT_APP_ID?.trim()
@@ -20,41 +22,11 @@ const incomeCategories = ['工资', '奖金', '退款', '其他收入']
 const hash = (value) => createHash('sha256').update(value).digest('hex')
 const queues = new Map()
 const imageDomains = ['qpic.cn', 'qq.com', 'gtimg.cn', 'nt.qq.com.cn']
-let accessToken = ''
-let tokenExpires = 0
-let tokenPromise = null
 let socket
 let heartbeat
 let lastSequence = null
 let sessionId = ''
 let stopping = false
-
-async function qqToken() {
-  if (accessToken && Date.now() < tokenExpires - 60000) return accessToken
-  if (!tokenPromise) tokenPromise = (async () => {
-    const response = await fetch('https://api.bot.qq.com/app/getAppAccessToken', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, clientSecret: secret }), signal: AbortSignal.timeout(15000),
-    })
-    const data = await response.json()
-    if (!response.ok || !data.access_token) throw new Error(`QQ access token request failed (${response.status}): ${data.message || data.code || 'unknown error'}`)
-    accessToken = data.access_token
-    tokenExpires = Date.now() + Number(data.expires_in || 3600) * 1000
-    return accessToken
-  })().finally(() => { tokenPromise = null })
-  return tokenPromise
-}
-
-async function qqRequest(path, options = {}) {
-  const token = await qqToken()
-  const response = await fetch(`https://api.bot.qq.com${path}`, {
-    ...options, headers: { Authorization: `QQBot ${token}`, 'Content-Type': 'application/json', ...options.headers },
-    signal: AbortSignal.timeout(15000),
-  })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(`QQ API request failed (${response.status}): ${data.message || data.code || 'unknown error'}`)
-  return data
-}
 
 async function reply({ openid, groupOpenid }, messageId, content) {
   const target = groupOpenid ? `groups/${encodeURIComponent(groupOpenid)}` : `users/${encodeURIComponent(openid)}`
@@ -216,14 +188,19 @@ async function parseMessage(binding, messages, chat, automatic = false) {
     : '付款人或收入归属固定为发送者，不需要填写名字。'
   const now = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TZ || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
   const purpose = automatic
-    ? '这是一条发在群里的普通消息。只有最新消息描述实际发生的收支，或明确补充了前面一笔收支的信息，才提取账单或追问。闲聊、报价、计划购买、无关图片或单独的数量返回 {"reply":"","expense":null}。不要把商品数量当成金额。'
-    : '用户发送文字或图片默认是记账，请读取图片和聊天中的账单。'
-  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。`
+    ? '这是一条发在群里的普通消息。只有最新消息描述实际发生的收支、明确请求任务/提醒，或补充前文信息，才提取或追问。闲聊、报价、计划购买、无关图片或单独的数量返回 {"reply":"","expense":null}。不要把商品数量当成金额。'
+    : '用户可能要求记账或任务提醒。按最新意图处理；图片默认记账。'
+  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。${taskInstructions(taskTimeNow())}`
   const recent = messages.slice(-8)
   const history = recent.map((message, index) => ({ ...message, content: message.content.slice(0, index === recent.length - 1 ? 3000 : 100) }))
   const lastImage = history.findLastIndex((message) => message.image)
   const imagePrompt = automatic ? '请判断图片是否含有账单。' : '请提取图片中的账单并记账。'
   const input = [{ role: 'system', content: system }, ...history.map((message, index) => ({ role: message.role, content: message.content || imagePrompt, ...(index === lastImage ? { image: message.image } : {}) }))]
+  let remaining = 4700 - system.length
+  for (let index = input.length - 1; index > 0; index--) {
+    input[index].content = input[index].content.slice(0, Math.max(0, Math.min(remaining, index === input.length - 1 ? 2400 : 100)))
+    remaining -= input[index].content.length
+  }
   async function askModel(inputMessages) {
     const data = await corecRequest(binding, 'llm/chat', { messages: inputMessages }, chat)
     const text = data.output_text || (data.output ? data.output.flatMap((item) => item.content || []).filter((item) => typeof item.text === 'string').map((item) => item.text).join('\n') : '') || data.choices?.[0]?.message?.content
@@ -231,9 +208,10 @@ async function parseMessage(binding, messages, chat, automatic = false) {
     return extractJson(text)
   }
   let result = await askModel(input)
-  if (!automatic && lastImage >= 0 && !result.expense && typeof result.reply === 'string' && !/[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply)) {
+  if (!automatic && lastImage >= 0 && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && typeof result.reply === 'string' && !/[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply)) {
     result = await askModel([{ ...input[0], content: `${system} 不要只描述图片。信息齐全时必须返回 expense，信息不全时请具体追问。` }, ...input.slice(1)])
   }
+  if (result.intent === 'task' || result.task || result.taskAction) return { reply: typeof result.reply === 'string' ? result.reply.trim() : '请补充任务时间和内容。', intent: 'task', task: result.task, taskAction: result.taskAction }
   try { return { reply: typeof result.reply === 'string' ? result.reply.trim() : automatic ? '' : '请补充账单信息。', expense: validateExpense(result.expense, binding, members) } }
   catch (error) { return { reply: error.message, expense: null } }
 }
@@ -264,6 +242,7 @@ function classifyMessage(event, eventType) {
   const command = /^\/?记账(?:\s+|[:：]\s*|$)/.exec(text)
   if (command) return { text: text.slice(command[0].length).trim(), mode: 'command' }
   if (!fullGroupMessage || mention) return { text, mode: 'direct' }
+  if (/提醒|待办|任务|定时/.test(text)) return { text, mode: 'task' }
   if (/^(确认入账|取消入账|重新记账)$/.test(text)) return { text, mode: 'follow-up' }
 
   const normalized = text.normalize('NFKC')
@@ -303,6 +282,13 @@ async function handleMessage(chat, event, message) {
     if (!binding) return '请先在 CoRec 群组面板生成绑定码，然后发送：绑定 绑定码'
   }
 
+  const taskCommand = /^(完成|取消)任务\s*#?(\d+)$/.exec(text)
+  if (taskCommand) {
+    await requireCurrentBinding(chat, binding)
+    const result = await corecRequest(binding, 'tasks/action', { id: Number(taskCommand[2]), status: taskCommand[1] === '完成' ? 'completed' : 'cancelled' }, chat)
+    return `任务 #${result.task.id} 已${taskCommand[1]}。`
+  }
+
   const state = await getState(chat, binding, continuation)
   const saveState = (value) => setState(chat, binding, value)
   const pending = state.pending
@@ -310,6 +296,7 @@ async function handleMessage(chat, event, message) {
   const cancelsEntry = /^(取消|取消入账)$/.test(text)
   const resetsEntry = text === '重新开始' || (groupOpenid && text === '重新记账')
   if (mode === 'automatic' && pending) return
+  if (mode === 'task' && pending) return '有一笔可能重复的账单等待处理，请先发送「确认入账」或「取消入账」，然后再安排任务。'
   if (continuation) {
     if (pending) {
       if (!confirmsEntry && !cancelsEntry && !resetsEntry) return
@@ -351,6 +338,21 @@ async function handleMessage(chat, event, message) {
   const previousMessages = image ? state.messages.map(({ image: _image, ...message }) => message) : state.messages
   const messages = [...previousMessages, { role: 'user', content: text, ...(image ? { image } : {}) }].slice(-10)
   const result = await parseMessage(binding, messages, chat, automatic)
+  if (result.intent === 'task') {
+    await requireCurrentBinding(chat, binding)
+    if (result.taskAction) {
+      const updated = await corecRequest(binding, 'tasks/action', result.taskAction, chat)
+      await saveState({ messages: [] })
+      return `任务 #${updated.task.id} 已${updated.task.status === 'completed' ? '完成' : '取消'}。`
+    }
+    if (result.task) {
+      const data = await corecRequest(binding, 'tasks', { ...result.task, requestId: hash(`task:${event.id}`) }, chat)
+      await saveState({ messages: [] })
+      return `已创建任务 #${data.task.id}：${data.task.title}\n${data.task.dueAt ? new Date(data.task.dueAt).toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong', hour12: false }) + '（香港时间）' : '未设置提醒时间'}\n${data.task.target === 'group' ? '将发送到本账本绑定的 QQ 群' : '将发送到你的 QQ 私聊'}；发送结果可在任务页面查看。`
+    }
+    await saveState({ messages: [...messages, { role: 'assistant', content: result.reply }].slice(-10) })
+    return result.reply
+  }
   if (!result.expense) {
     if (automatic && !result.reply) return
     let answer = /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply) ? result.reply : `${result.reply}\n请补充账单的收支类型、金额、日期和分类。`

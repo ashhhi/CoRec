@@ -24,6 +24,20 @@ Ordinary members and administrators can leave a group. Leaving or being removed 
 
 To run the group integration tests, use a separate MySQL 8 instance and set `COREC_TEST_MYSQL_URL` to its connection URL, then run `npm run test:groups`. The test account needs permission to create and drop databases. Each run creates a randomly named test database and removes it afterward. The tests cover approvals, invitations, role restrictions, concurrent ownership transfers, QQ cleanup, and dissolution. Without a test database connection, the suite is skipped.
 
+## Tasks and scheduled reminders
+
+The **任务** page stores shared tasks, assignees, due times, execution results, and notification status. Members can create tasks; the creator, assignee, owner, or administrator can complete, cancel, reschedule, or retry their notifications. Unscheduled reminders are simple to-do items. All task times use Hong Kong time (UTC+8).
+
+In web Chat, say `明天下午3点提醒我交水电费，在群里提醒` and confirm the task draft. In QQ, mention the bot with the same request; a complete task is saved immediately and the bot returns its number. Missing dates or times trigger a follow-up question. Say `完成任务 123` or `取消任务 123` to update a specific task. Follow-ups without mentioning the bot still require QQ to deliver ordinary group messages.
+
+Three task types are supported: reminders wait for a person to confirm completion; scheduled text generation produces a plan, list, or other text; ledger summaries report the current group's income and expenses from the first of the execution month through the execution date. Automatic tasks are marked complete only after a result is produced. External actions such as purchases, booking, sending email, or looking up live weather are not supported. Recurring schedules are not supported yet; schedule a single date and time.
+
+Notifications default to the QQ group linked to the current ledger. A private notification requires the assignee's QQ private binding to the same ledger. Configure `QQ_BOT_APP_ID` and `QQ_BOT_CLIENT_SECRET`: Compose passes them to both the API and bot. The API handles scheduling while the `qqbot` profile receives QQ conversations and completion replies. The API must stay running; it checks roughly every 10 seconds and processes overdue work after restarting. Long queues can delay notifications.
+
+Scheduled notifications use QQ's proactive messaging API, without reusing a past `msg_id`. QQ can reject them when permissions, rate limits, or the recipient's **允许主动发送** setting prevent delivery. See the [official QQ messaging overview](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html). The task page shows delivery separately from completion, retries failed sends up to three times, and allows a manual retry. Changing a QQ binding or leaving the group stops delivery; an explicit retry/reschedule is needed to use a new binding. Worker claims survive restarts, but a crash after QQ accepts a message and before the database records delivery can result in a duplicate notification. Long results remain fully available on the task page, with a shortened QQ message.
+
+The API creates the task table automatically on startup. Run `npm run test:tasks` with `COREC_TEST_MYSQL_URL` pointing to a separate test MySQL instance to exercise scheduling, completion, retries, permissions, and restart recovery. QQ sends and text generation are mocked in tests; no real notifications are sent.
+
 ## Chat model setup
 
 Configure the server-side model in `.env`. The default values below match the LingSuan setup shown in the Chat page:

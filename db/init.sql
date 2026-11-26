@@ -82,3 +82,23 @@ CREATE TABLE IF NOT EXISTS expenses (
   CONSTRAINT expenses_payer_fk FOREIGN KEY (payer_user_id) REFERENCES accounts(id),
   CONSTRAINT expenses_creator_fk FOREIGN KEY (created_by) REFERENCES accounts(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, group_id INT UNSIGNED NOT NULL,
+    created_by INT UNSIGNED NOT NULL, assignee_id INT UNSIGNED NOT NULL,
+    title VARCHAR(160) NOT NULL, details TEXT NOT NULL,
+    kind ENUM('reminder','generate_text','ledger_summary') NOT NULL DEFAULT 'reminder',
+    status ENUM('pending','running','waiting','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+    due_at DATETIME NULL, target ENUM('group','private') NOT NULL DEFAULT 'group', target_openid VARCHAR(128) NOT NULL DEFAULT '',
+    result TEXT NULL, error VARCHAR(500) NULL, request_id VARCHAR(80) NOT NULL,
+    delivery_status ENUM('none','pending','sending','sent','failed') NOT NULL DEFAULT 'none',
+    delivery_error VARCHAR(500) NULL, delivery_attempts INT UNSIGNED NOT NULL DEFAULT 0,
+    delivery_after DATETIME NULL, delivered_at DATETIME NULL,
+    lease_token VARCHAR(36) NULL, lease_until DATETIME NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    completed_at DATETIME NULL,
+    UNIQUE KEY task_request_idx (group_id, created_by, request_id),
+    INDEX task_due_idx (status, due_at), INDEX task_delivery_idx (delivery_status, delivery_after),
+    FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES accounts(id), FOREIGN KEY (assignee_id) REFERENCES accounts(id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

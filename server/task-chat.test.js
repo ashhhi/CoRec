@@ -1,0 +1,75 @@
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import vm from 'node:vm'
+import test from 'node:test'
+import { taskInstructions, taskTimeNow } from './task-protocol.js'
+
+const categories=['餐饮','交通','娱乐','购物','居住','其他']
+const incomeCategories=['工资','奖金','退款','其他收入']
+const member={id:3,displayName:'Ash'}
+const task={title:'交水电费',kind:'reminder',dueAt:'2099-01-01T15:00:00+08:00',target:'group'}
+const expense={type:'expense',category:'餐饮',amount:35,date:'2026-11-26',payerName:'Ash'}
+
+test('web Chat distinguishes task drafts, follow-up questions, actions and expenses',async()=>{
+  const source=await readFile(new URL('../src/ChatPage.jsx',import.meta.url),'utf8')
+  let answer={intent:'task',reply:'Task draft',task}
+  const requests=[]
+  const context=vm.createContext({categories,incomeCategories,taskInstructions,taskTimeNow,AbortController,
+    window:{setTimeout,clearTimeout},
+    fetch:async(url,options)=>{
+      const body=JSON.parse(options.body)
+      requests.push(body)
+      assert.ok(body.messages.reduce((size,item)=>size+item.content.length,0)<=5000)
+      assert.ok(body.messages.every((item)=>item.content.length<=4000))
+      assert.match(body.messages[0].content,/UTC\+8/)
+      return Response.json({output_text:JSON.stringify(answer)})
+    },
+  })
+  vm.runInContext(source.slice(source.indexOf('function extractJson('),source.indexOf('export default function ChatPage(')),context)
+  const history=[{id:'user',role:'user',content:'明天下午3点提醒我交水电费'}]
+  let result=await context.parseExpense(history,[member],member,1)
+  assert.equal(result.intent,'task');assert.equal(result.task.title,task.title);assert.equal(result.expense,undefined)
+  answer={intent:'task',reply:'请问明天几点？',task:null}
+  result=await context.parseExpense(history,[member],member,1)
+  assert.equal(result.task,null);assert.match(result.reply,/几点/)
+  answer={intent:'task',taskAction:{id:123,status:'completed'}}
+  result=await context.parseExpense(history,[member],member,1)
+  assert.equal(result.taskAction.id,123)
+  answer={intent:'expense',reply:'Expense draft',expense}
+  result=await context.parseExpense(history,[member],member,1)
+  assert.equal(result.expense.amount,35);assert.equal(result.expense.payerId,3)
+  answer={intent:'task',task}
+  const imageHistory=[{id:'image',role:'user',content:'',image:'test-image'}]
+  const count=requests.length
+  result=await context.parseExpense(imageHistory,[member],member,1)
+  assert.equal(result.intent,'task');assert.equal(requests.length,count+1)
+  const longHistory=Array.from({length:14},(_,i)=>({id:String(i),role:i%2?'assistant':'user',content:'x'.repeat(3000)}))
+  await context.parseExpense(longHistory,[member],member,1)
+})
+
+test('QQ Chat routes task requests and retains accounting responses',async()=>{
+  const source=await readFile(new URL('./qq-bot.js',import.meta.url),'utf8')
+  let answer={intent:'task',task}
+  const context=vm.createContext({categories,incomeCategories,taskInstructions,taskTimeNow,process:{env:{TZ:'Asia/Hong_Kong'}},
+    corecRequest:async(binding,path,body)=>{
+      assert.equal(path,'llm/chat')
+      assert.ok(body.messages.reduce((size,item)=>size+item.content.length,0)<=5000)
+      return {output_text:JSON.stringify(answer)}
+    },
+  })
+  vm.runInContext(source.slice(source.indexOf('function extractJson('),source.indexOf('async function handleMessage(')),context)
+  const binding={group_id:1,user_id:3}
+  const chat={groupOpenid:'group-one',openid:'member-three'}
+  const history=[{role:'user',content:'明天下午3点提醒我交水电费'}]
+  assert.equal(context.classifyMessage({content:history[0].content},'GROUP_MESSAGE_CREATE').mode,'task')
+  assert.equal(context.classifyMessage({content:'完成任务 123'},'GROUP_MESSAGE_CREATE').mode,'task')
+  let result=await context.parseMessage(binding,history,chat)
+  assert.equal(result.intent,'task');assert.equal(result.task.title,task.title)
+  answer={intent:'task',reply:'请补充时间',task:null}
+  result=await context.parseMessage(binding,history,chat)
+  assert.equal(result.task,null);assert.match(result.reply,/时间/)
+  answer={intent:'expense',reply:'',expense}
+  result=await context.parseMessage(binding,history,chat)
+  assert.equal(result.expense.amount,35)
+  assert.equal(result.expense.payerId,3)
+})

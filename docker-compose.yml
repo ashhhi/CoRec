@@ -34,6 +34,8 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_FORMAT: ${LLM_API_FORMAT:-chat-completions}
       QQ_BOT_INTERNAL_TOKEN: ${QQ_BOT_INTERNAL_TOKEN:-}
+      QQ_BOT_APP_ID: ${QQ_BOT_APP_ID:-}
+      QQ_BOT_CLIENT_SECRET: ${QQ_BOT_CLIENT_SECRET:-}
     depends_on:
       db:
         condition: service_healthy

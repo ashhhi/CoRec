@@ -7,6 +7,7 @@ import {
   BookOpen,
   BriefcaseBusiness,
   CircleDollarSign,
+  CheckSquare,
   Home,
   LogOut,
   MessageSquare,
@@ -24,6 +25,7 @@ import {
 } from 'lucide-react'
 import { AuthScreen, GroupAddMenu, GroupEntryDialog, GroupPanel } from './AccountViews.jsx'
 import ChatPage from './ChatPage.jsx'
+import TasksPage from './TasksPage.jsx'
 import LedgerColumnFilter from './LedgerColumnFilter.jsx'
 import { filterLedger, ledgerMemberOptions } from './ledgerFilters.js'
 import { describeDuplicate, saveExpense } from './expenseApi.js'
@@ -307,7 +309,7 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div>
-          <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button></nav>
+          <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button></nav>
           <div className="account-actions">
             <label className="group-select-wrap"><select aria-label="切换群组" value={activeGroupId || ''} onChange={(event) => setActiveGroupId(Number(event.target.value))}>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
             <button type="button" className="icon-button" title="群组设置" aria-label="群组设置" onClick={() => setShowGroupPanel(true)}><UsersRound size={18} /></button>
@@ -355,7 +357,7 @@ function App() {
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
         <LedgerCharts groupId={activeGroupId} month={month} />
-        </> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={() => loadLedger(month)} />}
+        </> : activePage === 'tasks' ? <TasksPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} role={activeGroup?.role} /> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={() => loadLedger(month)} />}
       </main>
 
       {selectedTransaction && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTransaction(null)}><section className="expense-modal transaction-detail" role="dialog" aria-modal="true" aria-labelledby="transaction-detail-title"><div className="modal-head"><h2 id="transaction-detail-title">账单详情</h2><button type="button" className="close-button" onClick={() => setSelectedTransaction(null)} aria-label="关闭"><X size={19} /></button></div><dl>{[['类型', selectedTransaction.type === 'income' ? '收入' : '支出'], ['金额', `¥${formatMoney(selectedTransaction.amount)}`], ['分类', selectedTransaction.category], ['商品名', selectedTransaction.productName || '未填写'], ['商家', selectedTransaction.merchant && selectedTransaction.merchant !== selectedTransaction.category ? selectedTransaction.merchant : '未填写'], ['日期', selectedTransaction.date], ['时间', selectedTransaction.time || '未记录'], [selectedTransaction.type === 'income' ? '收入归属' : '付款人', selectedTransaction.payer], ['备注', selectedTransaction.note || '无']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></section></div>}
