@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Bot, Check, ImagePlus, Send, Trash2, X } from 'lucide-react'
 import { describeDuplicate, saveExpense } from './expenseApi.js'
 import { taskInstructions, taskTimeNow } from '../server/task-protocol.js'
-import { taskApi, formatTaskTime, taskKindLabels } from './tasksApi.js'
+import { taskApi, formatTaskTime, taskKindLabels, recurrenceLabel } from './tasksApi.js'
 
 const categories = ['餐饮', '交通', '娱乐', '购物', '居住', '其他']
 const incomeCategories = ['工资', '奖金', '退款', '其他收入']
@@ -288,6 +288,7 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
             {message.task && <div className={message.task.saved ? 'expense-draft saved' : 'expense-draft'}>
               <div className="draft-heading"><strong>{message.task.saved ? '已创建任务' : '任务草稿'}</strong><span>{taskKindLabels[message.task.kind] || '提醒事项'}</span></div>
               <p>{message.task.title}</p>
+              {message.task.recurrence && <p>{recurrenceLabel(message.task.recurrence)}</p>}
               <p>{formatTaskTime(message.task.dueAt)} · {message.task.target === 'private' ? 'QQ 私聊' : 'QQ 群'}</p>
               {message.task.details && <p>{message.task.details}</p>}
               {!message.task.saved && !message.task.dismissed && <div className="draft-actions"><button type="button" className="confirm-draft" disabled={savingId === message.id} onClick={() => confirmTask(message)}><Check size={14} />{savingId === message.id ? '正在创建…' : '确认创建任务'}</button><button type="button" onClick={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, task: { ...item.task, dismissed: true } } : item))}>取消</button></div>}

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { GroupError, managesGroup } from './groups.js'
 import { getGroupBinding } from './qq-group.js'
+import { normalizeRecurrence, readRecurrence, nextOccurrence } from './task-recurrence.js'
 
 export async function ensureTaskSchema(pool) {
   await pool.query(`CREATE TABLE IF NOT EXISTS tasks (
@@ -17,11 +18,15 @@ export async function ensureTaskSchema(pool) {
     lease_token VARCHAR(36) NULL, lease_until DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     completed_at DATETIME NULL,
+    recurrence JSON NULL, series_id INT UNSIGNED NULL,
     UNIQUE KEY task_request_idx (group_id, created_by, request_id),
     INDEX task_due_idx (status, due_at), INDEX task_delivery_idx (delivery_status, delivery_after),
     FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES accounts(id), FOREIGN KEY (assignee_id) REFERENCES accounts(id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
+  const [columns] = await pool.query('SHOW COLUMNS FROM tasks')
+  if (!columns.some((column)=>column.Field === 'recurrence')) await pool.query('ALTER TABLE tasks ADD COLUMN recurrence JSON NULL')
+  if (!columns.some((column)=>column.Field === 'series_id')) await pool.query('ALTER TABLE tasks ADD COLUMN series_id INT UNSIGNED NULL')
 }
 
 const utc = (value) => value ? `${String(value).replace(' ', 'T')}Z` : null
@@ -30,7 +35,7 @@ const validId = (value) => Number.isSafeInteger(Number(value)) && Number(value) 
 export function serializeTask(row) {
   return { id: row.id, title: row.title, details: row.details, kind: row.kind, status: row.status,
     createdBy: row.created_by, assigneeId: row.assignee_id, assigneeName: row.assignee_name,
-    dueAt: utc(row.due_at), target: row.target, result: row.result, error: row.error,
+    dueAt: utc(row.due_at), recurrence: readRecurrence(row.recurrence), seriesId: row.series_id || null, target: row.target, result: row.result, error: row.error,
     deliveryStatus: row.delivery_status, deliveryError: row.delivery_error, deliveredAt: utc(row.delivered_at),
     createdAt: utc(row.created_at), completedAt: utc(row.completed_at) }
 }
@@ -53,9 +58,13 @@ export function validateTask(body) {
     dueAt = sqlDate(parsed)
   }
   if (kind !== 'reminder' && !dueAt) throw new GroupError(400, '自动任务需要设置执行时间。')
+  let recurrence
+  try { recurrence = normalizeRecurrence(body.recurrence) } catch (error) { throw new GroupError(400,error.message) }
+  if (recurrence && !dueAt) throw new GroupError(400,'重复任务需要设置首次执行时间。')
+  if (recurrence && recurrence.type !== 'interval') dueAt = sqlDate(nextOccurrence(recurrence,utc(dueAt),new Date(new Date(utc(dueAt)).valueOf()-1)))
   const requestId = body.requestId || randomUUID()
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(requestId)) throw new GroupError(400, '任务请求编号无效。')
-  return { title, details, kind, target, dueAt, requestId }
+  return { title, details, kind, target, dueAt, requestId, recurrence }
 }
 
 async function transaction(pool, run) {
@@ -97,8 +106,8 @@ export async function createTask(pool, groupId, userId, body, qqGroup) {
     const openid = await destination(connection, groupId, assigneeId, task.target)
     if (task.dueAt && !openid) throw new GroupError(400, task.target === 'group' ? '请先绑定本账本的 QQ 群，再设置群提醒。' : '负责人需先为本账本绑定 QQ 私聊。')
     const [result] = await connection.execute(`INSERT INTO tasks
-      (group_id,created_by,assignee_id,title,details,kind,due_at,target,target_openid,request_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
-    [groupId, userId, assigneeId, task.title, task.details, task.kind, task.dueAt, task.target, openid, task.requestId])
+      (group_id,created_by,assignee_id,title,details,kind,due_at,target,target_openid,request_id,recurrence) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    [groupId, userId, assigneeId, task.title, task.details, task.kind, task.dueAt, task.target, openid, task.requestId, task.recurrence ? JSON.stringify(task.recurrence) : null])
     const [[row]] = await connection.execute('SELECT * FROM tasks WHERE id = ?', [result.insertId])
     return serializeTask(row)
   })
@@ -118,17 +127,22 @@ export async function updateTask(pool, groupId, userId, id, body, qqGroup) {
       // Explicit retry authorizes delivery to the currently linked conversation.
       await connection.execute("UPDATE tasks SET target_openid=?, delivery_status='pending',delivery_attempts=0,delivery_after=UTC_TIMESTAMP(),delivery_error=NULL WHERE id=?", [current, id])
     } else if (['completed', 'cancelled'].includes(body.status)) {
+      if (task.recurrence && body.status === 'completed') throw new GroupError(400,'请完成具体执行记录；停止整个重复计划请取消任务。')
       if ((task.status === 'running' && body.status !== 'cancelled') || task.delivery_status === 'sending') throw new GroupError(409, '任务正在处理，请稍后操作。')
       await connection.execute(`UPDATE tasks SET status=?,completed_at=?,delivery_status=IF(delivery_status='sent','sent','none'),
         lease_token=NULL,lease_until=NULL WHERE id=?`, [body.status, body.status === 'completed' ? sqlDate(new Date()) : null, id])
+      if (task.recurrence && body.status === 'cancelled') {
+        await connection.execute(`UPDATE tasks SET status='cancelled',delivery_status='none',lease_token=NULL,lease_until=NULL
+          WHERE series_id=? AND status NOT IN ('completed','cancelled') AND delivery_status<>'sending'`,[id])
+      }
     } else if (body.action === 'reschedule') {
       if (!['pending', 'waiting', 'failed'].includes(task.status) || task.delivery_status === 'sending') throw new GroupError(409, '该任务当前不能改期。')
-      const validated = validateTask({ ...task, dueAt: body.dueAt, requestId: task.request_id })
+      const validated = validateTask({ ...task, recurrence: body.recurrence === undefined ? readRecurrence(task.recurrence) : body.recurrence, dueAt: body.dueAt, requestId: task.request_id })
       if (!validated.dueAt) throw new GroupError(400, '请设置新的提醒时间。')
       const current = await destination(connection, groupId, task.assignee_id, task.target)
       if (!current) throw new GroupError(400, '请先恢复 QQ 绑定。')
       await connection.execute(`UPDATE tasks SET due_at=?,target_openid=?,status='pending',result=NULL,error=NULL,
-        delivery_status='none',delivery_error=NULL,delivery_attempts=0,delivered_at=NULL,completed_at=NULL WHERE id=?`, [validated.dueAt, current, id])
+        delivery_status='none',delivery_error=NULL,delivery_attempts=0,delivered_at=NULL,completed_at=NULL,recurrence=? WHERE id=?`, [validated.dueAt, current, validated.recurrence ? JSON.stringify(validated.recurrence) : null, id])
     } else throw new GroupError(400, '任务操作无效。')
     const [[row]] = await connection.execute('SELECT * FROM tasks WHERE id=?', [id])
     return serializeTask(row)
@@ -138,7 +152,7 @@ export async function updateTask(pool, groupId, userId, id, body, qqGroup) {
 export function registerTaskRoutes(app, { pool, requireAuth, requireGroupMember }) {
   app.get('/api/groups/:groupId/tasks', requireAuth, requireGroupMember, async (request, response) => {
     const [rows] = await pool.execute(`SELECT t.*,a.display_name AS assignee_name FROM tasks t JOIN accounts a ON a.id=t.assignee_id
-      WHERE t.group_id=? ORDER BY t.created_at DESC,t.id DESC LIMIT 500`, [request.group.id])
+      WHERE t.group_id=? ORDER BY (t.recurrence IS NOT NULL AND t.status<>'cancelled') DESC,t.created_at DESC,t.id DESC LIMIT 500`, [request.group.id])
     const [[binding]] = await pool.execute('SELECT group_id FROM qq_group_links WHERE group_id=?', [request.group.id])
     response.set('Cache-Control','no-store').json({ tasks: rows.map(serializeTask), groupBound: Boolean(binding) })
   })
@@ -151,6 +165,10 @@ export function registerTaskRoutes(app, { pool, requireAuth, requireGroupMember 
 }
 
 async function eligible(connection, task) {
+  if (task.series_id) {
+    const [[series]]=await connection.execute('SELECT status FROM tasks WHERE id=?',[task.series_id])
+    if (!series || series.status === 'cancelled') throw new Error('重复计划已停止。')
+  }
   const [members] = await connection.execute('SELECT user_id FROM group_members WHERE group_id=? AND user_id IN (?,?)', [task.group_id, task.created_by, task.assignee_id])
   if (![task.created_by, task.assignee_id].every((id) => members.some((member) => member.user_id === id))) throw new Error('创建人或负责人已离开群组，任务停止。')
   const current = await destination(connection, task.group_id, task.assignee_id, task.target)
@@ -176,6 +194,20 @@ export async function processDueTask(pool, { generate }) {
   if (!task) return false
   try {
     await eligible(pool, task)
+    if (task.recurrence) {
+      await transaction(pool,async(connection)=>{
+        await lockMember(connection,task.group_id,task.created_by)
+        const [[current]]=await connection.execute('SELECT lease_token,status FROM tasks WHERE id=? FOR UPDATE',[task.id])
+        if (current?.lease_token !== task.lease_token || current.status !== 'running') return
+        const rule=readRecurrence(task.recurrence)
+        const next=sqlDate(nextOccurrence(rule,utc(task.due_at)))
+        await connection.execute(`INSERT INTO tasks (group_id,created_by,assignee_id,title,details,kind,due_at,target,target_openid,request_id,series_id)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id`,
+        [task.group_id,task.created_by,task.assignee_id,task.title,task.details,task.kind,task.due_at,task.target,task.target_openid,`repeat-${task.id}-${new Date(utc(task.due_at)).valueOf()}`,task.id])
+        await connection.execute("UPDATE tasks SET status='pending',due_at=?,lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?",[next,task.id,task.lease_token])
+      })
+      return true
+    }
     let result = null
     if (task.kind === 'generate_text') {
       result = await generate([

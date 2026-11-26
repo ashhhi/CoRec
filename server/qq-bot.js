@@ -4,6 +4,7 @@ import { isIP } from 'node:net'
 import mysql from 'mysql2/promise'
 import { qqToken, qqRequest } from './qq-api.js'
 import { taskInstructions, taskTimeNow } from './task-protocol.js'
+import { recurrenceLabel } from './task-recurrence.js'
 import { confirmGroupBinding, getGroupBinding, qqOpenidPattern, requestGroupBinding } from './qq-group.js'
 
 const appId = process.env.QQ_BOT_APP_ID?.trim()
@@ -242,7 +243,7 @@ function classifyMessage(event, eventType) {
   const command = /^\/?记账(?:\s+|[:：]\s*|$)/.exec(text)
   if (command) return { text: text.slice(command[0].length).trim(), mode: 'command' }
   if (!fullGroupMessage || mention) return { text, mode: 'direct' }
-  if (/提醒|待办|任务|定时/.test(text)) return { text, mode: 'task' }
+  if (/提醒|待办|任务|定时|叫我|喊我|叫醒|每天|每日|每周|每星期|每月|每隔/.test(text)) return { text, mode: 'task' }
   if (/^(确认入账|取消入账|重新记账)$/.test(text)) return { text, mode: 'follow-up' }
 
   const normalized = text.normalize('NFKC')
@@ -291,6 +292,7 @@ async function handleMessage(chat, event, message) {
 
   const state = await getState(chat, binding, continuation)
   const saveState = (value) => setState(chat, binding, value)
+  if (state.intent === 'task') message.taskConversation = true
   const pending = state.pending
   const confirmsEntry = /^(确认|仍然入账)$/.test(text) || (groupOpenid && text === '确认入账')
   const cancelsEntry = /^(取消|取消入账)$/.test(text)
@@ -339,6 +341,7 @@ async function handleMessage(chat, event, message) {
   const messages = [...previousMessages, { role: 'user', content: text, ...(image ? { image } : {}) }].slice(-10)
   const result = await parseMessage(binding, messages, chat, automatic)
   if (result.intent === 'task') {
+    message.taskConversation = true
     await requireCurrentBinding(chat, binding)
     if (result.taskAction) {
       const updated = await corecRequest(binding, 'tasks/action', result.taskAction, chat)
@@ -346,11 +349,18 @@ async function handleMessage(chat, event, message) {
       return `任务 #${updated.task.id} 已${updated.task.status === 'completed' ? '完成' : '取消'}。`
     }
     if (result.task) {
-      const data = await corecRequest(binding, 'tasks', { ...result.task, requestId: hash(`task:${event.id}`) }, chat)
+      let data
+      try {
+        data = await corecRequest(binding, 'tasks', { ...result.task, requestId: hash(`task:${event.id}`) }, chat)
+      } catch (error) {
+        const answer = `任务还未创建：${error.message}\n请补充或修改任务信息后继续。`
+        await saveState({ intent: 'task', messages: [...messages, { role:'assistant', content:answer }].slice(-10) })
+        return answer
+      }
       await saveState({ messages: [] })
-      return `已创建任务 #${data.task.id}：${data.task.title}\n${data.task.dueAt ? new Date(data.task.dueAt).toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong', hour12: false }) + '（香港时间）' : '未设置提醒时间'}\n${data.task.target === 'group' ? '将发送到本账本绑定的 QQ 群' : '将发送到你的 QQ 私聊'}；发送结果可在任务页面查看。`
+      return `已创建任务 #${data.task.id}：${data.task.title}\n${recurrenceLabel(data.task.recurrence)}\n${data.task.dueAt ? new Date(data.task.dueAt).toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong', hour12: false }) + '（香港时间）' : '未设置提醒时间'}\n${data.task.target === 'group' ? '将发送到本账本绑定的 QQ 群' : '将发送到你的 QQ 私聊'}；发送结果可在任务页面查看。`
     }
-    await saveState({ messages: [...messages, { role: 'assistant', content: result.reply }].slice(-10) })
+    await saveState({ intent: 'task', messages: [...messages, { role: 'assistant', content: result.reply }].slice(-10) })
     return result.reply
   }
   if (!result.expense) {
@@ -382,8 +392,8 @@ async function processEvent(chat, event, message) {
   let output
   try { output = await handleMessage(chat, event, message) } catch (error) {
     console.error('QQ message processing failed:', error.message)
-    if (message.mode === 'automatic' || message.mode === 'continuation') return
-    output = chat.groupOpenid ? '处理失败，请稍后重试。' : `处理失败：${error.message || '请稍后重试。'}`
+    if ((message.mode === 'automatic' || message.mode === 'continuation') && !message.taskConversation) return
+    output = message.mode === 'task' || message.taskConversation ? `任务处理失败：${error.message || '请稍后重试。'}` : chat.groupOpenid ? '处理失败，请稍后重试。' : `处理失败：${error.message || '请稍后重试。'}`
   }
   if (output) await reply(chat, messageId, output)
 }

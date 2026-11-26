@@ -27,6 +27,7 @@ import { AuthScreen, GroupAddMenu, GroupEntryDialog, GroupPanel } from './Accoun
 import ChatPage from './ChatPage.jsx'
 import TasksPage from './TasksPage.jsx'
 import LedgerColumnFilter from './LedgerColumnFilter.jsx'
+import LedgerCalendar from './LedgerCalendar.jsx'
 import { filterLedger, ledgerMemberOptions } from './ledgerFilters.js'
 import { describeDuplicate, saveExpense } from './expenseApi.js'
 import './styles.css'
@@ -309,7 +310,7 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div>
-          <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button></nav>
+          <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button></nav>
           <div className="account-actions">
             <label className="group-select-wrap"><select aria-label="切换群组" value={activeGroupId || ''} onChange={(event) => setActiveGroupId(Number(event.target.value))}>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
             <button type="button" className="icon-button" title="群组设置" aria-label="群组设置" onClick={() => setShowGroupPanel(true)}><UsersRound size={18} /></button>
@@ -356,6 +357,7 @@ function App() {
           </div>
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
+        {!allMonths && <LedgerCalendar key={`${activeGroupId}:${selectedMonth}`} month={selectedMonth} transactions={transactions} today={today} loading={loading} />}
         <LedgerCharts groupId={activeGroupId} month={month} />
         </> : activePage === 'tasks' ? <TasksPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} role={activeGroup?.role} /> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={() => loadLedger(month)} />}
       </main>

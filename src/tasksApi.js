@@ -1,3 +1,4 @@
+export { recurrenceLabel } from '../server/task-recurrence.js'
 export const taskKindLabels = { reminder: '提醒事项', generate_text: '定时生成文字', ledger_summary: '账本收支汇总' }
 export const taskStatusLabels = { pending: '待处理', running: '执行中', waiting: '待确认完成', completed: '已完成', failed: '执行失败', cancelled: '已取消' }
 

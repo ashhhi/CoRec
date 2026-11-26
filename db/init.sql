@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     lease_token VARCHAR(36) NULL, lease_until DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     completed_at DATETIME NULL,
+    recurrence JSON NULL, series_id INT UNSIGNED NULL,
     UNIQUE KEY task_request_idx (group_id, created_by, request_id),
     INDEX task_due_idx (status, due_at), INDEX task_delivery_idx (delivery_status, delivery_after),
     FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
