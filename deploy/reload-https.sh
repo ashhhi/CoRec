@@ -10,8 +10,7 @@ fi
 script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
 project_dir="$(cd -- "$(dirname -- "$script_path")/.." && pwd)"
 compose=(docker compose --project-directory "$project_dir"
-  -f "$project_dir/docker-compose.yml"
-  -f "$project_dir/docker-compose.https.yml")
+  -f "$project_dir/docker-compose.yml")
 
 "${compose[@]}" exec -T web nginx -t
 exec "${compose[@]}" exec -T web nginx -s reload

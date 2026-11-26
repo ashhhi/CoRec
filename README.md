@@ -2,17 +2,23 @@
 
 React + Express + MySQL app. Docker Compose runs the web frontend, API, and database together. Register an account with a password, create a group, then share its invite code so others can apply to join. A group owner or administrator must approve each application before the applicant can access the ledger. Group members share that group's ledger; other groups cannot access it.
 
-## Run locally with Docker
+## Run with Docker
 
-Copy `.env.example` to `.env`, set unique values for `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD`, then run:
+Copy `.env.example` to `.env` and set unique values for `MYSQL_PASSWORD` and `MYSQL_ROOT_PASSWORD`. Docker Compose now includes HTTPS in its main configuration and publishes ports 80 and 443. For the first deployment on Ubuntu with a fixed public IP and no domain, follow [the IP certificate deployment guide](deploy/HTTPS.md) to obtain a certificate and enable automatic renewal.
+
+Once the certificate is installed, start or update the app with:
 
     docker compose up --build -d
 
-Open `http://localhost:8080` (or the port set by `APP_PORT`), register an account, then create a group or join with an invite code. Passwords are hashed before storage, and login sessions use HttpOnly cookies stored in MySQL. MySQL data is stored in the `mysql_data` Docker volume. The database initialization script runs when that volume is first created; the API also applies missing schema changes when it starts.
+Open `https://YOUR_PUBLIC_IP`, register an account, then create a group or join with an invite code. Passwords are hashed before storage, and login sessions use HttpOnly cookies stored in MySQL. MySQL data is stored in the `mysql_data` Docker volume. The database initialization script runs when that volume is first created; the API also applies missing schema changes when it starts.
 
-Set `COOKIE_SECURE=true` when serving the app over HTTPS. Leave it `false` for local HTTP development.
+Keep `COOKIE_SECURE=true` in `.env` when serving the app over HTTPS. If upgrading an existing deployment, change its old `COOKIE_SECURE=false` setting to `true`. The old `APP_PORT` setting is no longer used; a second Compose file is no longer needed.
 
-For HTTPS on Ubuntu with a fixed public IP and no domain, follow [the IP certificate deployment guide](deploy/HTTPS.md). It includes a separate Compose configuration, HTTP-to-HTTPS redirects, and automatic certificate renewal with Nginx reloads.
+For local HTTP development, select the HTTP configuration and disable secure cookies for that invocation:
+
+    COREC_NGINX_CONFIG=./deploy/nginx.conf COOKIE_SECURE=false docker compose up --build -d
+
+Then open `http://localhost`. Use the same environment overrides for subsequent local HTTP updates. Production HTTPS redirects HTTP requests automatically, and certificate renewal reloads Nginx without restarting the container.
 
 ## Group membership and permissions
 
