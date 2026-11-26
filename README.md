@@ -1,6 +1,6 @@
 # CoRec
 
-React + Express + MySQL app. Docker Compose runs the web frontend, API, and database together. Register an account with a password, create a group, then share its invite code so others can join. Group members share that group's ledger; other groups cannot access it.
+React + Express + MySQL app. Docker Compose runs the web frontend, API, and database together. Register an account with a password, create a group, then share its invite code so others can apply to join. A group owner or administrator must approve each application before the applicant can access the ledger. Group members share that group's ledger; other groups cannot access it.
 
 ## Run locally with Docker
 
@@ -11,6 +11,18 @@ Copy `.env.example` to `.env`, set unique values for `MYSQL_PASSWORD` and `MYSQL
 Open `http://localhost:8080` (or the port set by `APP_PORT`), register an account, then create a group or join with an invite code. Passwords are hashed before storage, and login sessions use HttpOnly cookies stored in MySQL. MySQL data is stored in the `mysql_data` Docker volume. The database initialization script runs when that volume is first created; the API also applies missing schema changes when it starts.
 
 Set `COOKIE_SECURE=true` when serving the app over HTTPS. Leave it `false` for local HTTP development.
+
+## Group membership and permissions
+
+The group panel lists every member's role and QQ private/group binding status. Owners and administrators can copy the invite code, invite an existing CoRec account by username, approve or reject applications, and withdraw invitations. A direct invitation requires the recipient to accept it; an invite code only submits an application. Applicants can view or withdraw their applications, and recipients can accept or decline invitations in the same panel. These lists refresh while the panel is open; approval updates the applicant's available groups automatically.
+
+Only the owner can appoint or remove administrators, transfer ownership, or dissolve the group. Administrators can remove ordinary members; the owner can also remove administrators. Ownership can be transferred to any existing member. The previous owner becomes an ordinary member and can then leave; each group always has one owner. Invite codes are visible only to the owner and administrators.
+
+Owners and administrators can change the group name in the group settings. Names must contain 1–80 characters after trimming surrounding whitespace. Saving refreshes the title and group selector; other members see name updates while their group panel is open.
+
+Ordinary members and administrators can leave a group. Leaving or being removed clears that group's QQ private binding, group identity, and pending binding codes; past ledger entries remain in the group. Dissolving a group permanently deletes its ledger entries, membership, QQ bindings, applications, and invitations. The website asks for confirmation before removing members, changing administrators, transferring ownership, leaving, or dissolving a group. The API applies the role migration and creates the application/invitation tables automatically on startup.
+
+To run the group integration tests, use a separate MySQL 8 instance and set `COREC_TEST_MYSQL_URL` to its connection URL, then run `npm run test:groups`. The test account needs permission to create and drop databases. Each run creates a randomly named test database and removes it afterward. The tests cover approvals, invitations, role restrictions, concurrent ownership transfers, QQ cleanup, and dissolution. Without a test database connection, the suite is skipped.
 
 ## Chat model setup
 

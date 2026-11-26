@@ -22,11 +22,32 @@ CREATE TABLE IF NOT EXISTS ledger_groups (
 CREATE TABLE IF NOT EXISTS group_members (
   group_id INT UNSIGNED NOT NULL,
   user_id INT UNSIGNED NOT NULL,
-  role ENUM('owner', 'member') NOT NULL DEFAULT 'member',
+  role ENUM('owner', 'admin', 'member') NOT NULL DEFAULT 'member',
   joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (group_id, user_id),
   CONSTRAINT group_members_group_fk FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
   CONSTRAINT group_members_account_fk FOREIGN KEY (user_id) REFERENCES accounts(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS group_join_requests (
+  group_id INT UNSIGNED NOT NULL,
+  user_id INT UNSIGNED NOT NULL,
+  status ENUM('pending', 'rejected') NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (group_id, user_id),
+  FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES accounts(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS group_invitations (
+  group_id INT UNSIGNED NOT NULL,
+  user_id INT UNSIGNED NOT NULL,
+  invited_by INT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (group_id, user_id),
+  FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY (invited_by) REFERENCES accounts(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS sessions (

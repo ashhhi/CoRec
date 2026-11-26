@@ -94,6 +94,41 @@ button { border: 0; cursor: pointer; }
 .invite-code { margin-top: 7px; color: #394750; font-family: 'DM Mono', monospace; font-size: 19px; letter-spacing: .12em; }
 .member-list { display: flex; flex-direction: column; gap: 11px; margin-top: 17px; padding-top: 13px; border-top: 1px solid #ece9e1; }
 .member-row { display: flex; align-items: center; gap: 8px; color: #57646a; font-size: 10px; }.member-row .avatar { border: 0; }.member-row small { margin-left: auto; color: #a0a8a2; font-size: 9px; }
+.member-row .avatar { flex-shrink: 0; align-self: flex-start; }
+.member-info { flex: 1; min-width: 0; }
+.member-heading { display: flex; align-items: baseline; gap: 8px; }
+.member-heading > span { min-width: 0; overflow-wrap: anywhere; }
+.member-heading small { flex-shrink: 0; }
+.member-qq-bindings { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.member-qq-status { padding: 3px 6px; border: 1px solid #e5e4de; border-radius: 5px; color: #737d77; background: #f2f1eb; font-size: 9px; line-height: 1.5; }
+.member-qq-status.is-bound { color: #3c7658; border-color: #d4e5d8; background: #edf5ee; }
+.member-qq-status.is-other-group { color: #90662e; border-color: #eadfc9; background: #faf3e7; }
+.member-list > .error-banner { margin-top: 0; }
+.group-help { margin: 9px 0; color: #7d8881; font-size: 10px; line-height: 1.6; }
+.group-access-section, .group-lifecycle { margin-top: 20px; padding-top: 16px; border-top: 1px solid #ece9e1; }
+.group-access-section h3, .group-lifecycle h3 { margin: 0 0 10px; color: #3b4851; font-size: 12px; }
+.group-access-section h3:not(:first-child) { margin-top: 18px; }
+.group-access-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid #eeece5; }
+.group-access-person { display: flex; flex: 1 1 130px; min-width: 0; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.group-access-person strong { color: #4b5960; font-size: 11px; font-weight: 600; }
+.group-access-person > span { color: #7d8881; font-size: 10px; }
+.group-inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; }
+.group-inline-actions button { min-height: 28px; padding: 3px 0; background: transparent; color: #3c7658; font-size: 10px; }
+.group-inline-actions button.is-danger { color: #aa513c; }
+.group-inline-actions button:disabled, .group-secondary-button:disabled, .group-danger-button:disabled { cursor: wait; opacity: .5; }
+.member-actions { margin-top: 4px; }
+.member-actions button { min-height: 24px; }
+.group-invite-form, .group-name-form { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-bottom: 8px; }
+.group-invite-form label, .group-name-form label { flex: 1 1 170px; }
+.group-invite-form input, .group-name-form input { height: 36px; }
+.group-invite-form .primary-button, .group-name-form .primary-button { height: 36px; padding: 0 12px; font-size: 11px; box-shadow: none; }
+.group-transfer-form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 10px 0 16px; }
+.group-transfer-form label { flex: 1 1 150px; min-width: 0; }
+.group-transfer-form select { width: 100%; height: 36px; padding: 0 8px; color: #52616a; border: 1px solid #e6e4dd; border-radius: 6px; background: #fffefa; font-size: 11px; }
+.group-secondary-button, .group-danger-button { min-height: 36px; padding: 8px 12px; border: 1px solid #e1ded4; border-radius: 6px; color: #697772; background: transparent; font-size: 11px; }
+.group-danger-button { color: #aa513c; border-color: #efcbbf; background: #fff7f3; }
+.success-banner { margin-top: 16px; padding: 10px 12px; border-radius: 6px; color: #3c7658; background: #edf5ee; font-size: 11px; line-height: 1.6; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .group-actions { margin-top: 21px; }
 .qq-binding { margin-top: 18px; padding-top: 14px; border-top: 1px solid #ece9e1; }
 .qq-binding p { margin: 10px 0; color: #697772; font-size: 11px; line-height: 1.6; }

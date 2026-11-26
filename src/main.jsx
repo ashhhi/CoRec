@@ -290,7 +290,7 @@ function App() {
 
   if (authLoading) return <main className="account-page"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><div className="account-loading">正在连接 CoRec…</div></main>
   if (!user) return <AuthScreen onAuthenticated={async () => { await loadProfile() }} />
-  if (!groups.length) return <GroupPanel user={user} groups={groups} activeGroup={null} onChanged={async (group) => { await loadProfile(group.id) }} fullScreen />
+  if (!groups.length) return <GroupPanel user={user} groups={groups} activeGroup={null} onChanged={async (group) => { await loadProfile(group?.id) }} fullScreen />
 
   return (
     <div className="app-shell">
@@ -360,7 +360,7 @@ function App() {
           <button className="primary-button modal-submit" type="submit" disabled={saving || !members.length}><Plus size={18} />{saving ? '保存中…' : entryType === 'income' ? '保存这笔收入' : '保存这笔支出'}</button>
         </form>
       </div>}
-      {showGroupPanel && <GroupPanel user={user} groups={groups} activeGroup={activeGroup} onChanged={async (group) => { await loadProfile(group.id) }} onClose={() => setShowGroupPanel(false)} />}
+      {showGroupPanel && <GroupPanel user={user} groups={groups} activeGroup={activeGroup} onChanged={async (group) => { await loadProfile(group?.id) }} onClose={() => setShowGroupPanel(false)} />}
       {showProfilePanel && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowProfilePanel(false)}><section className="group-panel profile-modal"><div className="group-panel-heading"><div className="account-icon"><UserRound size={20} /></div><div><p className="eyebrow">PERSONAL PROFILE</p><h2>修改个人名字</h2><p>这个名字会显示在群组成员和账单中。</p></div><button className="close-button" onClick={() => setShowProfilePanel(false)} aria-label="关闭"><X size={19} /></button></div><form className="account-form profile-form" onSubmit={updateDisplayName}><label><span>名字</span><input value={profileName} onChange={(event) => setProfileName(event.target.value)} minLength="1" maxLength="32" autoComplete="name" required /></label>{profileError && <div className="error-banner" role="alert">{profileError}</div>}<button className="primary-button account-submit" type="submit" disabled={profileSaving}>{profileSaving ? '保存中…' : '保存名字'}</button></form></section></div>}
     </div>
   )

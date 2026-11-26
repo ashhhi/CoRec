@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "concurrently -k \"node --env-file-if-exists=.env server/index.js\" \"vite\"",
     "build": "vite build",
+    "test:groups": "node --test server/groups.test.js",
     "preview": "vite preview",
     "start": "node server/index.js"
   },

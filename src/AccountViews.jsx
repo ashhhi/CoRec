@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { Copy, KeyRound, UsersRound, X } from 'lucide-react'
 
 async function requestJson(url, options = {}) {
@@ -177,14 +177,14 @@ function QqGroupBinding({ groupId }) {
         busy={busy}
       />
     </ul> : !error && <p role="status">正在读取群聊绑定状态…</p>}
-    {status && !status.linked && !status.canManage && <p>请先由账本创建者绑定 QQ 群，再绑定你的 QQ 群身份。</p>}
+    {status && !status.linked && !status.canManage && <p>请先由群主绑定 QQ 群，再绑定你的 QQ 群身份。</p>}
     {status && !status.memberBound && (status.linked || status.canManage) && <>
       {confirmCode && <div className="qq-code" aria-live="polite">
         <span>用同一个 QQ 账号，在原群里 @机器人 发送</span>
         <strong>确认绑定 {confirmCode}</strong>
       </div>}
       <p>{confirmCode ? '如需重新获取确认码，请填写 QQ 群绑定请求码。' : '在 QQ 群里 @机器人 发送「绑定」，然后填入机器人回复的请求码。'}</p>
-      {!status.linked && !confirmCode && <p>创建者完成首次确认时，会同时绑定账本和自己的 QQ 群身份。</p>}
+      {!status.linked && !confirmCode && <p>群主完成首次确认时，会同时绑定账本和自己的 QQ 群身份。</p>}
       <form className="account-form qq-binding-form" onSubmit={claim}>
         <label>
           <span>QQ 群绑定请求码</span>
@@ -258,31 +258,147 @@ function QqPrivateBinding({ groupId }) {
   </>
 }
 
+function GroupAccessInbox({ groups, onChanged, revision }) {
+  const [access, setAccess] = useState({ requests: [], invitations: [] })
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [reload, setReload] = useState(0)
+  const latest = useRef({ groups, onChanged })
+  latest.current = { groups, onChanged }
+
+  useEffect(() => {
+    let current = true
+    let refreshing = false
+    async function refresh() {
+      if (refreshing) return
+      refreshing = true
+      try {
+        const data = await requestJson('/api/group-access')
+        if (!current) return
+        setAccess(data)
+        setError('')
+        const signature = (items) => JSON.stringify(items.map(({ id, role, name }) => [id, role, name]).sort((a, b) => a[0] - b[0]))
+        if (signature(data.memberships) !== signature(latest.current.groups)) await latest.current.onChanged()
+      } catch (requestError) {
+        if (current) setError(requestError.message)
+      } finally {
+        refreshing = false
+      }
+    }
+    refresh()
+    const timer = window.setInterval(() => { if (!document.hidden) refresh() }, 5000)
+    window.addEventListener('focus', refresh)
+    return () => { current = false; window.clearInterval(timer); window.removeEventListener('focus', refresh) }
+  }, [revision, reload])
+
+  async function respond(groupId, action) {
+    setBusy(true)
+    setError('')
+    try {
+      if (action === 'withdraw') await requestJson(`/api/group-requests/${groupId}`, { method: 'DELETE' })
+      else {
+        const data = await requestJson(`/api/group-invitations/${groupId}`, { method: 'POST', body: JSON.stringify({ action }) })
+        if (data.group) await latest.current.onChanged(data.group)
+      }
+      setReload((value) => value + 1)
+    } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
+  }
+
+  return <>
+    {(access.requests.length > 0 || access.invitations.length > 0) && <section className="group-access-section" aria-label="我的入群申请与邀请">
+      <h3>我的入群申请与邀请</h3>
+      {access.invitations.map((invitation) => <div className="group-access-row" key={`invite-${invitation.groupId}`}>
+        <div className="group-access-person"><strong>{invitation.groupName}</strong><span>{invitation.invitedBy} 邀请你加入</span></div>
+        <div className="group-inline-actions"><button type="button" onClick={() => respond(invitation.groupId, 'accept')} disabled={busy}>接受</button><button type="button" onClick={() => respond(invitation.groupId, 'decline')} disabled={busy}>拒绝</button></div>
+      </div>)}
+      {access.requests.map((application) => <div className="group-access-row" key={`request-${application.groupId}`}>
+        <div className="group-access-person"><strong>{application.groupName}</strong><span>{application.status === 'pending' ? '等待群主或管理员审批' : '申请未通过，可重新提交'}</span></div>
+        <div className="group-inline-actions"><button type="button" onClick={() => respond(application.groupId, 'withdraw')} disabled={busy}>{application.status === 'pending' ? '撤回' : '移除'}</button></div>
+      </div>)}
+    </section>}
+    {error && <div className="error-banner" role="alert">申请与邀请更新失败：{error}</div>}
+  </>
+}
+
+const groupRoleLabels = { owner: '群主', admin: '管理员', member: '成员' }
+
 export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, fullScreen = false }) {
   const [mode, setMode] = useState('join')
   const [members, setMembers] = useState([])
+  const [membersError, setMembersError] = useState('')
   const [inviteCode, setInviteCode] = useState(activeGroup?.inviteCode || '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [role, setRole] = useState(activeGroup?.role || 'member')
+  const [access, setAccess] = useState({ requests: [], invitations: [] })
+  const [revision, setRevision] = useState(0)
+  const [notice, setNotice] = useState('')
+  const [inviteUsername, setInviteUsername] = useState('')
+  const [successorId, setSuccessorId] = useState('')
+  const [nameDraft, setNameDraft] = useState(activeGroup?.name || '')
+  const nameEdited = useRef(false)
+  const latest = useRef({ onChanged })
+  latest.current = { onChanged }
+  const canManage = role === 'owner' || role === 'admin'
+
+  useEffect(() => {
+    setNotice('')
+    setError('')
+    setInviteUsername('')
+    nameEdited.current = false
+    setNameDraft(activeGroup?.name || '')
+  }, [activeGroup?.id])
+
+  useEffect(() => {
+    if (!nameEdited.current) setNameDraft(activeGroup?.name || '')
+  }, [activeGroup?.name])
 
   useEffect(() => {
     if (!activeGroup) return
     let current = true
-    requestJson(`/api/groups/${activeGroup.id}`).then(({ group }) => {
-      if (!current) return
-      setMembers(group.members)
-      setInviteCode(group.invite_code || group.inviteCode || activeGroup.inviteCode)
-    }).catch((requestError) => {
-      if (current) setError(requestError.message)
-    })
-    return () => { current = false }
-  }, [activeGroup?.id])
+    let refreshing = false
+    setMembers([])
+    setMembersError('')
+    setAccess({ requests: [], invitations: [] })
+    setRole(activeGroup.role || 'member')
+    setInviteCode('')
+    setSuccessorId('')
+    async function refresh() {
+      if (refreshing) return
+      refreshing = true
+      try {
+        const { group } = await requestJson(`/api/groups/${activeGroup.id}`)
+        if (!current) return
+        setMembers(group.members)
+        setRole(group.role)
+        setInviteCode(group.inviteCode || '')
+        setMembersError('')
+        if (group.role === 'owner' || group.role === 'admin') {
+          const data = await requestJson(`/api/groups/${activeGroup.id}/access`)
+          if (current) setAccess(data)
+        } else setAccess({ requests: [], invitations: [] })
+      } catch (requestError) {
+        if (current) setMembersError(requestError.message)
+      } finally {
+        refreshing = false
+      }
+    }
+    refresh()
+    const timer = window.setInterval(() => { if (!document.hidden) refresh() }, 5000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      current = false
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [activeGroup?.id, revision])
 
   async function submit(event) {
     event.preventDefault()
     setBusy(true)
     setError('')
+    setNotice('')
     const form = new FormData(event.currentTarget)
     const creating = mode === 'create'
     try {
@@ -290,13 +406,47 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
         method: 'POST',
         body: JSON.stringify(creating ? { name: form.get('name') } : { inviteCode: form.get('inviteCode') }),
       })
-      await onChanged(data.group)
-      if (!fullScreen) onClose()
+      if (creating) {
+        await onChanged(data.group)
+        if (!fullScreen) onClose()
+      } else {
+        setNotice(`已向「${data.request.groupName}」提交申请，等待群主或管理员审批。`)
+        setRevision((value) => value + 1)
+      }
     } catch (requestError) {
       setError(requestError.message)
     } finally {
       setBusy(false)
     }
+  }
+
+  async function manage(path, { method = 'POST', body, confirmation, success, leave = false, profile = false } = {}) {
+    if (confirmation && !window.confirm(confirmation)) return
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      await requestJson(`/api/groups/${activeGroup.id}${path}`, { method, ...(body ? { body: JSON.stringify(body) } : {}) })
+      setNotice(success || '操作成功。')
+      if (profile || leave) await latest.current.onChanged()
+      if (leave) { if (!fullScreen) onClose(); return }
+      setRevision((value) => value + 1)
+      return true
+    } catch (requestError) { setError(requestError.message); return false } finally { setBusy(false) }
+  }
+
+  async function rename(event) {
+    event.preventDefault()
+    const name = nameDraft.trim()
+    if (await manage('', { method: 'PATCH', body: { name }, success: '群组名称已更新。', profile: true })) {
+      nameEdited.current = false
+      setNameDraft(name)
+    }
+  }
+
+  async function invite(event) {
+    event.preventDefault()
+    await manage('/invitations', { body: { username: inviteUsername }, success: '邀请已发送，对方接受后即可加入。' })
   }
 
   async function copyInvite() {
@@ -311,9 +461,69 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
 
   const content = <>
     <div className="group-panel-heading"><div className="account-icon"><UsersRound size={20} /></div><div><p className="eyebrow">SHARED GROUP</p><h2>{activeGroup ? activeGroup.name : '加入一个群组'}</h2><p>{activeGroup ? `${members.length} 位成员 · ${user.displayName}` : '群组成员可以共同查看和记录账单。'}</p></div>{!fullScreen && <button className="close-button" onClick={onClose} aria-label="关闭"><X size={19} /></button>}</div>
-    {activeGroup && <QqBindingTabs key={activeGroup.id} groupId={activeGroup.id} />}
-    {activeGroup && <div className="group-detail"><div className="group-detail-heading"><span>群组邀请码</span><button className="copy-button" onClick={copyInvite}><Copy size={15} />{copied ? '已复制' : '复制'}</button></div><div className="invite-code">{inviteCode}</div><div className="member-list">{members.map((member) => <div className="member-row" key={member.id}><span className={`avatar ${member.id === user.id ? 'avatar-coral' : 'avatar-blue'}`}>{member.displayName.slice(0, 1)}</span><span>{member.displayName}{member.id === user.id ? '（你）' : ''}</span><small>{member.role === 'owner' ? '创建者' : '成员'}</small></div>)}</div></div>}
-    <div className="group-actions"><div className="mode-tabs"><button className={mode === 'join' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('join'); setError('') }}>加入群组</button><button className={mode === 'create' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('create'); setError('') }}>创建群组</button></div><form className="account-form" onSubmit={submit}>{mode === 'create' ? <label><span>群组名称</span><input name="name" maxLength="80" placeholder="例如：周末搭子" required /></label> : <label><span>邀请码</span><input name="inviteCode" autoCapitalize="characters" maxLength="16" placeholder="输入 16 位邀请码" required /></label>}{error && <div className="error-banner" role="alert">{error}</div>}<button className="primary-button account-submit" type="submit" disabled={busy}>{busy ? '请稍候…' : mode === 'create' ? '创建群组' : '加入群组'}</button></form></div>
+    {activeGroup && canManage && <section className="group-access-section" aria-label="群组设置">
+      <h3>群组设置</h3>
+      <form className="account-form group-name-form" onSubmit={rename}>
+        <label><span>群组名称</span><input value={nameDraft} onChange={(event) => { nameEdited.current = true; setNameDraft(event.target.value) }} maxLength="80" required /></label>
+        <button type="submit" className="primary-button" disabled={busy || !nameDraft.trim() || nameDraft.trim() === activeGroup.name}>保存名称</button>
+      </form>
+    </section>}
+    {activeGroup && <QqBindingTabs key={`${activeGroup.id}:${role}`} groupId={activeGroup.id} />}
+    {activeGroup && <div className="group-detail">
+      {canManage ? <>
+        <div className="group-detail-heading"><span>群组邀请码</span><button type="button" className="copy-button" onClick={copyInvite} disabled={!inviteCode}><Copy size={15} />{copied ? '已复制' : '复制'}</button></div>
+        <div className="invite-code">{inviteCode || '正在读取…'}</div>
+        <p className="group-help">使用邀请码申请后，需由群主或管理员审批。</p>
+      </> : <div className="group-detail-heading"><span>群组成员</span><span>邀请成员请联系群主或管理员</span></div>}
+      <div className="member-list" aria-label="群组成员与 QQ 绑定状态">
+        {members.map((member) => <div className="member-row" key={member.id}>
+          <span className={`avatar ${member.id === user.id ? 'avatar-coral' : 'avatar-blue'}`}>{member.displayName.slice(0, 1)}</span>
+          <div className="member-info">
+            <div className="member-heading"><span>{member.displayName}{member.id === user.id ? '（你）' : ''}</span><small>{groupRoleLabels[member.role]}</small></div>
+            <div className="member-qq-bindings">
+              <span className={`member-qq-status${member.qqPrivateBound ? member.qqPrivateInGroup ? ' is-bound' : ' is-other-group' : ''}`}>QQ 私聊 · {member.qqPrivateBound ? member.qqPrivateInGroup ? '已绑定' : '已绑定其他账本' : '未绑定'}</span>
+              <span className={`member-qq-status${member.qqGroupBound ? ' is-bound' : ''}`}>QQ 群聊 · {member.qqGroupBound ? '已绑定' : '未绑定'}</span>
+            </div>
+            {canManage && member.id !== user.id && member.role !== 'owner' && <div className="group-inline-actions member-actions">
+              {role === 'owner' && <button type="button" disabled={busy} onClick={() => manage(`/members/${member.id}`, { method: 'PATCH', body: { role: member.role === 'admin' ? 'member' : 'admin' }, confirmation: `确定${member.role === 'admin' ? '取消' : '设置'} ${member.displayName} 的管理员身份？` })}>{member.role === 'admin' ? '取消管理员' : '设为管理员'}</button>}
+              {(role === 'owner' || member.role === 'member') && <button type="button" className="is-danger" disabled={busy} onClick={() => manage(`/members/${member.id}`, { method: 'DELETE', confirmation: `将 ${member.displayName} 移出群组？该成员将失去账本访问权限，历史账单保留。` })}>移出群组</button>}
+            </div>}
+          </div>
+        </div>)}
+        {membersError && <div className="error-banner" role="alert">成员绑定状态更新失败：{membersError}</div>}
+      </div>
+    </div>}
+    {activeGroup && canManage && <section className="group-access-section" aria-label="群组管理">
+      <h3>邀请成员</h3>
+      <form className="account-form group-invite-form" onSubmit={invite}>
+        <label><span>CoRec 账号</span><input value={inviteUsername} onChange={(event) => setInviteUsername(event.target.value)} placeholder="输入对方的登录账号" minLength="2" maxLength="32" required /></label>
+        <button type="submit" className="primary-button" disabled={busy}>发送邀请</button>
+      </form>
+      {access.invitations.map((invitation) => <div className="group-access-row" key={invitation.userId}>
+        <div className="group-access-person"><strong>{invitation.displayName}</strong><span>{invitation.username} · 等待接受邀请</span></div>
+        <div className="group-inline-actions"><button type="button" disabled={busy} onClick={() => manage(`/invitations/${invitation.userId}`, { method: 'DELETE', success: '邀请已撤回。' })}>撤回邀请</button></div>
+      </div>)}
+      <h3>入群申请{access.requests.length > 0 ? `（${access.requests.length}）` : ''}</h3>
+      {access.requests.length === 0 ? <p className="group-help">暂无待审批的申请。</p> : access.requests.map((application) => <div className="group-access-row" key={application.userId}>
+        <div className="group-access-person"><strong>{application.displayName}</strong><span>{application.username}</span></div>
+        <div className="group-inline-actions"><button type="button" disabled={busy} onClick={() => manage(`/requests/${application.userId}`, { body: { action: 'approve' }, success: '申请已通过。' })}>通过</button><button type="button" className="is-danger" disabled={busy} onClick={() => manage(`/requests/${application.userId}`, { body: { action: 'reject' }, success: '申请已拒绝。' })}>拒绝</button></div>
+      </div>)}
+    </section>}
+    <GroupAccessInbox groups={groups} onChanged={onChanged} revision={revision} />
+    {notice && <div className="success-banner" role="status">{notice}</div>}
+    {error && <div className="error-banner" role="alert">{error}</div>}
+    {activeGroup && <section className="group-lifecycle" aria-label="退出与群主管理">
+      {role === 'owner' ? <>
+        <h3>转让群主</h3>
+        <p className="group-help">转让后，你将成为普通成员，新群主接管群组管理权限。</p>
+        <form className="group-transfer-form" onSubmit={(event) => { event.preventDefault(); manage('/transfer-owner', { body: { userId: Number(successorId) }, confirmation: `将群主转让给 ${members.find((member) => member.id === Number(successorId))?.displayName}？转让后你将失去群主权限。`, success: '群主已转让，你现在是普通成员。', profile: true }) }}>
+          <label><span className="visually-hidden">新群主</span><select value={successorId} onChange={(event) => setSuccessorId(event.target.value)} required><option value="">选择新群主</option>{members.filter((member) => member.id !== user.id).map((member) => <option key={member.id} value={member.id}>{member.displayName}（{groupRoleLabels[member.role]}）</option>)}</select></label>
+          <button type="submit" className="group-secondary-button" disabled={busy || !successorId}>转让群主</button>
+        </form>
+        <button type="button" className="group-danger-button" disabled={busy} onClick={() => manage('', { method: 'DELETE', confirmation: `解散「${activeGroup.name}」？所有成员将退出，该群组的全部账单、QQ 绑定、申请和邀请都会删除，无法恢复。`, leave: true })}>解散群组</button>
+      </> : <button type="button" className="group-danger-button" disabled={busy} onClick={() => manage('/membership', { method: 'DELETE', confirmation: `退出「${activeGroup.name}」？你将失去账本访问权限，该群组的 QQ 绑定会解除，历史账单保留。`, leave: true })}>退出群组</button>}
+    </section>}
+    <div className="group-actions"><div className="mode-tabs"><button className={mode === 'join' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('join'); setError('') }}>申请加入群组</button><button className={mode === 'create' ? 'mode-tab active' : 'mode-tab'} onClick={() => { setMode('create'); setError('') }}>创建群组</button></div><form className="account-form" onSubmit={submit}>{mode === 'create' ? <label><span>群组名称</span><input name="name" maxLength="80" placeholder="例如：周末搭子" required /></label> : <label><span>邀请码</span><input name="inviteCode" autoCapitalize="characters" maxLength="16" placeholder="输入 16 位邀请码" required /></label>}<button className="primary-button account-submit" type="submit" disabled={busy}>{busy ? '请稍候…' : mode === 'create' ? '创建群组' : '提交入群申请'}</button></form></div>
   </>
 
   if (fullScreen) return <main className="account-page"><header className="topbar"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><span className="account-user" title={user.username}>{user.displayName}</span></header><section className="group-panel account-panel setup-panel">{content}</section></main>

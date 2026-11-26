@@ -7,6 +7,7 @@ import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import mysql from 'mysql2/promise'
 import { claimGroupBinding, ensureQqGroupSchema, getGroupBinding, getGroupBindingStatus, groupCodePattern, qqOpenidPattern, removeGroupBinding } from './qq-group.js'
+import { ensureGroupSchema, GroupError, managesGroup, registerGroupRoutes } from './groups.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -239,13 +240,14 @@ async function ensureSchema() {
     CREATE TABLE IF NOT EXISTS group_members (
       group_id INT UNSIGNED NOT NULL,
       user_id INT UNSIGNED NOT NULL,
-      role ENUM('owner', 'member') NOT NULL DEFAULT 'member',
+      role ENUM('owner', 'admin', 'member') NOT NULL DEFAULT 'member',
       joined_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (group_id, user_id),
       CONSTRAINT group_members_group_fk FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
       CONSTRAINT group_members_account_fk FOREIGN KEY (user_id) REFERENCES accounts(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `)
+  await ensureGroupSchema(pool)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash CHAR(64) NOT NULL,
@@ -388,7 +390,7 @@ app.put('/api/auth/profile', requireAuth, async (request, response) => {
 
 app.get('/api/auth/me', requireAuth, async (request, response) => {
   const [groups] = await pool.execute(`
-    SELECT g.id, g.name, g.invite_code AS inviteCode, gm.role
+    SELECT g.id, g.name, CASE WHEN gm.role IN ('owner', 'admin') THEN g.invite_code ELSE NULL END AS inviteCode, gm.role
     FROM group_members gm
     JOIN ledger_groups g ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -399,7 +401,7 @@ app.get('/api/auth/me', requireAuth, async (request, response) => {
 
 app.get('/api/groups', requireAuth, async (request, response) => {
   const [groups] = await pool.execute(`
-    SELECT g.id, g.name, g.invite_code AS inviteCode, gm.role
+    SELECT g.id, g.name, CASE WHEN gm.role IN ('owner', 'admin') THEN g.invite_code ELSE NULL END AS inviteCode, gm.role
     FROM group_members gm
     JOIN ledger_groups g ON g.id = gm.group_id
     WHERE gm.user_id = ?
@@ -437,37 +439,45 @@ app.post('/api/groups', requireAuth, async (request, response) => {
   }
 })
 
-app.post('/api/groups/join', requireAuth, async (request, response) => {
-  const inviteCode = typeof request.body?.inviteCode === 'string' ? request.body.inviteCode.trim().toUpperCase() : ''
-  if (!invitePattern.test(inviteCode)) return response.status(400).json({ error: '请输入有效的邀请码。' })
-  const [groups] = await pool.execute('SELECT id, name, invite_code FROM ledger_groups WHERE invite_code = ? LIMIT 1', [inviteCode])
-  if (!groups.length) return response.status(404).json({ error: '没有找到这个群组，请检查邀请码。' })
-  try {
-    await pool.execute("INSERT INTO group_members (group_id, user_id, role) VALUES (?, ?, 'member')", [groups[0].id, request.user.id])
-  } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') return response.status(409).json({ error: '你已经在这个群组里了。' })
-    throw error
-  }
-  response.status(201).json({ group: { id: groups[0].id, name: groups[0].name, inviteCode: groups[0].invite_code, role: 'member' } })
-})
+registerGroupRoutes(app, { pool, requireAuth, invitePattern, usernamePattern })
 
 app.get('/api/groups/:groupId', requireAuth, requireGroupMember, async (request, response) => {
   const [members] = await pool.execute(`
-    SELECT a.id, a.username, a.display_name AS displayName, gm.role
+    SELECT a.id, a.username, a.display_name AS displayName, gm.role,
+      qb.group_id AS qqPrivateGroupId, qgm.user_id IS NOT NULL AS qqGroupBound
     FROM group_members gm
     JOIN accounts a ON a.id = gm.user_id
+    LEFT JOIN qq_bindings qb ON qb.user_id = gm.user_id
+    LEFT JOIN qq_group_members qgm ON qgm.group_id = gm.group_id AND qgm.user_id = gm.user_id
     WHERE gm.group_id = ?
     ORDER BY gm.joined_at, a.id
   `, [request.group.id])
-  response.json({ group: { ...request.group, members } })
+  const { invite_code: inviteCode, ...group } = request.group
+  response.set('Cache-Control', 'no-store').json({ group: { ...group, ...(managesGroup(group.role) ? { inviteCode } : {}), members: members.map(({ qqPrivateGroupId, qqGroupBound, ...member }) => ({
+    ...member,
+    qqPrivateBound: qqPrivateGroupId != null,
+    qqPrivateInGroup: qqPrivateGroupId === request.group.id,
+    qqGroupBound: Boolean(qqGroupBound),
+  })) } })
 })
 
 app.post('/api/groups/:groupId/qq/bind-code', requireAuth, requireGroupMember, async (request, response) => {
   if (request.get('X-CoRec-Bot-Token')) return response.status(403).json({ error: '请在网站上生成绑定码。' })
   if ((process.env.QQ_BOT_INTERNAL_TOKEN || '').length < 32) return response.status(503).json({ error: 'QQ Bot 尚未配置。' })
   const code = randomBytes(8).toString('hex').toUpperCase()
-  await pool.execute('DELETE FROM qq_bind_codes WHERE expires_at <= UTC_TIMESTAMP() OR user_id = ?', [request.user.id])
-  await pool.execute('INSERT INTO qq_bind_codes (code_hash, user_id, group_id, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE))', [tokenHash(code), request.user.id, request.group.id])
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
+    const [[member]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
+    if (!member) throw new GroupError(403, '你已离开该群组。')
+    await connection.execute('DELETE FROM qq_bind_codes WHERE expires_at <= UTC_TIMESTAMP() OR user_id = ?', [request.user.id])
+    await connection.execute('INSERT INTO qq_bind_codes (code_hash, user_id, group_id, expires_at) VALUES (?, ?, ?, DATE_ADD(UTC_TIMESTAMP(), INTERVAL 10 MINUTE))', [tokenHash(code), request.user.id, request.group.id])
+    await connection.commit()
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally { connection.release() }
   response.json({ code, expiresIn: 600 })
 })
 
@@ -504,7 +514,7 @@ app.delete(qqGroupBindingPath, requireAuth, requireGroupMember, async (request, 
   const { scope } = request.query
   if (scope !== 'group' && scope !== 'member') return response.status(400).json({ error: '解绑范围无效。' })
   const removed = await removeGroupBinding(pool, request.group.id, request.user.id, scope === 'group')
-  if (!removed) return response.status(403).json({ error: '只有该 CoRec 群组的创建者可以解除 QQ 群绑定。' })
+  if (!removed) return response.status(403).json({ error: '只有该 CoRec 群组的群主可以解除 QQ 群绑定。' })
   response.json({ ok: true })
 })
 
@@ -706,6 +716,12 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   try {
     await connection.beginTransaction()
     await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
+    const [[currentMember]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
+    const [[currentPayer]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, payerUserId])
+    if (!currentMember || !currentPayer) {
+      await connection.rollback()
+      return response.status(403).json({ error: '群组成员已变更，请刷新后重试。' })
+    }
     if (!await hasCurrentQqGroupBinding(connection, request, request.group.id)) {
       await connection.rollback()
       return response.status(403).json({ error: 'QQ 群绑定已失效。' })
@@ -744,12 +760,24 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
 app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember, async (request, response) => {
   const id = Number(request.params.id)
   if (!Number.isSafeInteger(id) || id < 1) return response.status(400).json({ error: '账单编号无效。' })
-  const [result] = await pool.execute('DELETE FROM expenses WHERE id = ? AND group_id = ?', [id, request.group.id])
-  if (!result.affectedRows) return response.status(404).json({ error: '账单不存在。' })
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
+    const [[member]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
+    if (!member) throw new GroupError(403, '你已离开该群组。')
+    const [result] = await connection.execute('DELETE FROM expenses WHERE id = ? AND group_id = ?', [id, request.group.id])
+    if (!result.affectedRows) throw new GroupError(404, '账单不存在。')
+    await connection.commit()
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally { connection.release() }
   response.json({ deleted: true })
 })
 
 app.use((error, _request, response, _next) => {
+  if (error instanceof GroupError) return response.status(error.status).json({ error: error.message })
   if (error.type === 'entity.too.large') return response.status(413).json({ error: '上传内容过大，请选择不超过 4 MB 的图片。' })
   console.error(error)
   response.status(500).json({ error: '服务暂时不可用，请稍后重试。' })

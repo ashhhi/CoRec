@@ -74,7 +74,7 @@ async function checkGroupBinding(connection, groupId, userId, request) {
   if (ledgerLink && ledgerLink.group_openid !== request.group_openid) return '这个账本已绑定另一个 QQ 群。'
   const [[qqLink]] = await connection.execute('SELECT group_id FROM qq_group_links WHERE group_openid = ?', [request.group_openid])
   if (qqLink && qqLink.group_id !== groupId) return '这个 QQ 群已绑定另一个账本。'
-  if (!qqLink && member.role !== 'owner') return '请先由该 CoRec 群组的创建者绑定 QQ 群。'
+  if (!qqLink && member.role !== 'owner') return '请先由该 CoRec 群组的群主绑定 QQ 群。'
 
   const [identities] = await connection.execute(`SELECT member_openid, user_id FROM qq_group_members
     WHERE group_id = ? AND (member_openid = ? OR user_id = ?)`, [groupId, request.member_openid, userId])
