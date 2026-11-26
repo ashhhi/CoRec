@@ -338,7 +338,7 @@ function App() {
     setLedgerRevision((value) => value + 1)
   }
 
-  if (authLoading) return <main className="account-page"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><div className="account-loading">正在连接 CoRec…</div></main>
+  if (authLoading) return <main className="account-page"><div className="brand"><img className="brand-mark" src="/cat-head.svg" alt="" aria-hidden="true" /><span>CoRec</span></div><div className="account-loading">正在连接 CoRec…</div></main>
   if (!user) return <AuthScreen onAuthenticated={async () => { await loadProfile() }} />
   if (!groups.length) return <GroupPanel user={user} groups={groups} activeGroup={null} onChanged={async (group) => { await loadProfile(group?.id) }} fullScreen />
 
@@ -346,7 +346,7 @@ function App() {
     <div className="app-shell">
       <main className="main-content">
         <header ref={topbarRef} className="topbar">
-          <div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div>
+          <div className="brand"><img className="brand-mark" src="/cat-head.svg" alt="" aria-hidden="true" /><span>CoRec</span></div>
           <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button></nav>
           <div className="account-actions">
             <label className="group-select-wrap"><select aria-label="切换群组" value={activeGroupId || ''} onChange={(event) => setActiveGroupId(Number(event.target.value))}>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
