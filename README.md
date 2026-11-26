@@ -51,6 +51,10 @@ Log in to CoRec, select the desired group, open the group panel, and generate a 
 
 Send a text message or one image to record an entry. The bot asks for missing details and saves complete entries. When another entry in the same group has the same date, type and amount, the bot lists possible duplicates and waits for `确认` or `取消`. Send `重新开始` to discard an unfinished conversation. QQ may deliver the same event more than once; processed message IDs are stored to prevent repeat processing. The bot stores unfinished conversation context, including its latest image, in MySQL for up to 24 hours; processed event hashes are retained for up to seven days. Completed conversations are cleared.
 
+For QQ group chat, enable group @ message access for the bot in QQ Open Platform and add the bot to the QQ group. The CoRec group owner first mentions the bot and sends `绑定` in that chat. In the CoRec group panel, enter the returned request code under **QQ 群聊绑定**, then mention the bot again in the same chat and send `确认绑定 <code>` with the code displayed on the website. The request expires after 10 minutes. Each QQ group links to one CoRec ledger, and each ledger links to one QQ group.
+
+Other members must join that CoRec group and complete the same verification with their own accounts. The QQ identity that requests the code must also send the confirmation. Members can unlink their own identity, and the CoRec owner can unlink the entire QQ group. This group identity is separate from the private-chat binding. Group entries are assigned to the sender's CoRec account. Mention the bot on each follow-up, including `确认` and `取消`. The bot refuses entries from unbound senders or anyone who no longer belongs to the ledger, and omits past ledger entries from group replies.
+
 To stop the services while keeping database contents:
 
     docker compose down

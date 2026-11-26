@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   ArrowLeft,
@@ -78,7 +78,8 @@ function App() {
   const [groupInfo, setGroupInfo] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
   const [activePage, setActivePage] = useState('ledger')
-  const [month, setMonth] = useState(() => localMonth(new Date()))
+  const [selectedMonth, setSelectedMonth] = useState(() => localMonth(new Date()))
+  const [allMonths, setAllMonths] = useState(false)
   const [transactions, setTransactions] = useState([])
   const [groupBalance, setGroupBalance] = useState(0)
   const [typeFilter, setTypeFilter] = useState('all')
@@ -96,8 +97,10 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const ledgerRequest = useRef(0)
 
   const today = localDate(new Date())
+  const month = allMonths ? 'all' : selectedMonth
   const activeGroup = groups.find((group) => group.id === activeGroupId) || null
   const members = groupInfo?.members || []
   const filterCategories = typeFilter === 'income'
@@ -105,7 +108,7 @@ function App() {
     : typeFilter === 'expense'
       ? Object.keys(categoryMeta)
       : [...Object.keys(categoryMeta), ...incomeCategories]
-  const monthLabel = new Date(`${month}-01T12:00:00`).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' })
+  const monthLabel = new Date(`${selectedMonth}-01T12:00:00`).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' })
   const visibleTransactions = transactions.filter((item) => {
     const matchesType = typeFilter === 'all' || item.type === typeFilter
     const matchesFilter = activeFilter === '全部' || item.category === activeFilter
@@ -154,6 +157,7 @@ function App() {
   }, [user?.id, activeGroupId])
 
   async function loadLedger(monthToLoad = month) {
+    const requestId = ++ledgerRequest.current
     if (!user || !activeGroupId) {
       setTransactions([])
       setGroupBalance(0)
@@ -165,13 +169,15 @@ function App() {
     try {
       const response = await fetch(`/api/groups/${activeGroupId}/ledger?month=${encodeURIComponent(monthToLoad)}`)
       const data = await readJson(response)
+      if (requestId !== ledgerRequest.current) return
       setTransactions(data.expenses)
       setGroupBalance(Number(data.balance) || 0)
     } catch (loadError) {
+      if (requestId !== ledgerRequest.current) return
       setError(loadError.message || '无法连接账本服务。')
       if (loadError.message.includes('登录')) setUser(null)
     } finally {
-      setLoading(false)
+      if (requestId === ledgerRequest.current) setLoading(false)
     }
   }
 
@@ -203,7 +209,8 @@ function App() {
       }
       setShowModal(false)
       const expenseMonth = result.expense.date.slice(0, 7)
-      if (expenseMonth !== month) setMonth(expenseMonth)
+      if (allMonths) await loadLedger(month)
+      else if (expenseMonth !== selectedMonth) setSelectedMonth(expenseMonth)
       else await loadLedger(month)
     } catch (saveError) {
       setError(saveError.message || '保存账单失败。')
@@ -268,9 +275,17 @@ function App() {
   }
 
   function shiftMonth(offset) {
-    const date = new Date(`${month}-01T12:00:00`)
+    if (allMonths) return
+    const date = new Date(`${selectedMonth}-01T12:00:00`)
     date.setMonth(date.getMonth() + offset)
-    setMonth(localMonth(date))
+    setSelectedMonth(localMonth(date))
+  }
+
+  function selectTransactionType(type) {
+    if (type === typeFilter) return
+    const categories = type === 'income' ? incomeCategories : Object.keys(categoryMeta)
+    if (type !== 'all' && !categories.includes(activeFilter)) setActiveFilter('全部')
+    setTypeFilter(type)
   }
 
   if (authLoading) return <main className="account-page"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><div className="account-loading">正在连接 CoRec…</div></main>
@@ -288,13 +303,18 @@ function App() {
 
         {activePage === 'ledger' ? <>
         <section className="month-toolbar">
-          <div className="month-picker"><button className="round-button" aria-label="上个月" onClick={() => shiftMonth(-1)}><ArrowLeft size={16} /></button><span>{monthLabel}</span><button className="round-button" aria-label="下个月" onClick={() => shiftMonth(1)}><ArrowRight size={16} /></button></div>
+          <div className="month-picker">
+            <button className="round-button" aria-label="上个月" onClick={() => shiftMonth(-1)} disabled={allMonths}><ArrowLeft size={16} /></button>
+            <span>{monthLabel}</span>
+            <button className="round-button" aria-label="下个月" onClick={() => shiftMonth(1)} disabled={allMonths}><ArrowRight size={16} /></button>
+            <button type="button" className="month-scope-button" aria-pressed={allMonths} onClick={() => setAllMonths((current) => !current)}>全部账单</button>
+          </div>
         </section>
 
         <section className="balance-summary" aria-label="账本余额">
           <div className="balance-primary"><span>累计结余</span><strong className={groupBalance < 0 ? 'negative-balance' : ''}>{groupBalance < 0 ? '− ' : ''}¥{formatMoney(Math.abs(groupBalance))}</strong><small>累计收入减累计支出</small></div>
-          <div className="balance-stat"><span>本月收入</span><strong className="income-text">+ ¥{formatMoney(monthIncome)}</strong></div>
-          <div className="balance-stat"><span>本月支出</span><strong>− ¥{formatMoney(monthExpense)}</strong></div>
+          <div className="balance-stat"><span>{allMonths ? '全部收入' : '本月收入'}</span><strong className="income-text">+ ¥{formatMoney(monthIncome)}</strong></div>
+          <div className="balance-stat"><span>{allMonths ? '全部支出' : '本月支出'}</span><strong>− ¥{formatMoney(monthExpense)}</strong></div>
         </section>
 
         <section className="ledger-section panel">
@@ -302,8 +322,10 @@ function App() {
           {error && <div className="error-banner" role="alert">{error}</div>}
           <div className="ledger-controls">
             <div className="ledger-filter-group">
-              <div className="filter-tabs" aria-label="账目类型">
-                {[['all', '全部'], ['expense', '支出'], ['income', '收入']].map(([value, label]) => <button key={value} className={typeFilter === value ? 'filter-tab active' : 'filter-tab'} onClick={() => { setTypeFilter(value); setActiveFilter('全部') }}>{label}</button>)}
+              <div className="filter-tabs" role="group" aria-label="账单类型">
+                {[['all', '全部'], ['expense', '支出'], ['income', '收入']].map(([value, label]) => (
+                  <button type="button" key={value} className="filter-tab" aria-pressed={typeFilter === value} onClick={() => selectTransactionType(value)}>{label}</button>
+                ))}
               </div>
               <label className="category-filter"><span>分类</span><select value={activeFilter} onChange={(event) => setActiveFilter(event.target.value)}><option value="全部">全部分类</option>{filterCategories.map((category) => <option key={category}>{category}</option>)}</select></label>
             </div>
@@ -311,7 +333,7 @@ function App() {
           </div>
           <div className="transactions-list">
             <div className="transaction-header" aria-hidden="true"><span>日期</span><span className="transaction-header-icon" /><span>分类</span><span>商品</span><span>商家</span><span>成员</span><span className="transaction-header-amount">金额</span><span /></div>
-            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>换个关键词或分类试试</div></> : <>这个月还没有账单<div>记下群组的第一笔共同支出</div></>}</div>}
+            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>换个关键词或分类试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
           </div>
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
@@ -472,13 +494,19 @@ function TrendChart({ timeline, from, to, granularity }) {
 }
 
 function LedgerCharts({ groupId, month }) {
-  const [from, setFrom] = useState(`${month}-01`)
-  const [to, setTo] = useState(monthEnd(month))
+  const allMonths = month === 'all'
+  const [from, setFrom] = useState(allMonths ? '2000-01-01' : `${month}-01`)
+  const [to, setTo] = useState(allMonths ? localDate(new Date()) : monthEnd(month))
   const [granularity, setGranularity] = useState('day')
   const [analytics, setAnalytics] = useState({ categories: [], timeline: [] })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const rangeValid = Boolean(from && to && from <= to)
+
+  useEffect(() => {
+    setFrom(allMonths ? '2000-01-01' : `${month}-01`)
+    setTo(allMonths ? localDate(new Date()) : monthEnd(month))
+  }, [month, allMonths])
 
   useEffect(() => {
     if (!rangeValid) {
@@ -503,7 +531,7 @@ function LedgerCharts({ groupId, month }) {
 
   const categories = analytics.categories || []
   const totalExpense = categories.reduce((sum, item) => sum + Number(item.amount), 0)
-  const monthLabel = `${from} 至 ${to}`
+  const monthLabel = allMonths ? '全部时间' : `${from} 至 ${to}`
   return <section className="analytics-section" aria-label="收支统计">
     <div className="analytics-toolbar">
       <div><p className="eyebrow">LEDGER ANALYTICS</p><h2>收支统计</h2></div>

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import mysql from 'mysql2/promise'
+import { confirmGroupBinding, getGroupBinding, qqOpenidPattern, requestGroupBinding } from './qq-group.js'
 
 const appId = process.env.QQ_BOT_APP_ID?.trim()
 const secret = process.env.QQ_BOT_CLIENT_SECRET?.trim()
@@ -55,8 +56,9 @@ async function qqRequest(path, options = {}) {
   return data
 }
 
-async function reply(openid, messageId, content) {
-  await qqRequest(`/v2/users/${encodeURIComponent(openid)}/messages`, {
+async function reply({ openid, groupOpenid }, messageId, content) {
+  const target = groupOpenid ? `groups/${encodeURIComponent(groupOpenid)}` : `users/${encodeURIComponent(openid)}`
+  await qqRequest(`/v2/${target}/messages`, {
     method: 'POST', body: JSON.stringify({ msg_type: 0, content: content.slice(0, 1900), msg_id: messageId, msg_seq: 1 }),
   })
 }
@@ -95,19 +97,27 @@ async function getBinding(openid) {
   return rows[0] || null
 }
 
-async function requireCurrentBinding(openid, binding) {
-  const current = await getBinding(openid)
+async function requireCurrentBinding({ openid, groupOpenid }, binding) {
+  const current = groupOpenid ? await getGroupBinding(pool, groupOpenid, openid) : await getBinding(openid)
   if (!current || current.user_id !== binding.user_id || current.group_id !== binding.group_id) throw new Error('QQ 绑定已变更，请重新发送账单。')
 }
 
-async function getState(openid) {
-  const [rows] = await pool.execute('SELECT state FROM qq_conversations WHERE openid = ? AND updated_at > DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY)', [openid])
+async function getState({ openid, groupOpenid }, binding) {
+  const [rows] = groupOpenid
+    ? await pool.execute(`SELECT state FROM qq_group_members WHERE group_id = ? AND member_openid = ? AND user_id = ?
+      AND state_updated_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)`, [binding.group_id, openid, binding.user_id])
+    : await pool.execute('SELECT state FROM qq_conversations WHERE openid = ? AND updated_at > DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY)', [openid])
   if (!rows.length) return { messages: [] }
   const state = typeof rows[0].state === 'string' ? JSON.parse(rows[0].state) : rows[0].state
   return state && Array.isArray(state.messages) ? state : { messages: [] }
 }
 
-async function setState(openid, state) {
+async function setState({ openid, groupOpenid }, binding, state) {
+  if (groupOpenid) {
+    await pool.execute(`UPDATE qq_group_members SET state = ?, state_updated_at = UTC_TIMESTAMP()
+      WHERE group_id = ? AND member_openid = ? AND user_id = ?`, [JSON.stringify(state), binding.group_id, openid, binding.user_id])
+    return
+  }
   await pool.execute('INSERT INTO qq_conversations (openid, state) VALUES (?, ?) ON DUPLICATE KEY UPDATE state = VALUES(state), updated_at = CURRENT_TIMESTAMP', [openid, JSON.stringify(state)])
 }
 
@@ -155,9 +165,14 @@ async function readImage(attachment) {
   return `data:${mime};base64,${content.toString('base64')}`
 }
 
-async function corecRequest(binding, path, body) {
+async function corecRequest(binding, path, body, chat) {
+  const headers = { 'Content-Type': 'application/json', 'X-CoRec-Bot-Token': internalToken, 'X-CoRec-Bot-User': String(binding.user_id) }
+  if (chat.groupOpenid) {
+    headers['X-CoRec-QQ-Group'] = chat.groupOpenid
+    headers['X-CoRec-QQ-Member'] = chat.openid
+  }
   const response = await fetch(`${apiUrl}/api/groups/${binding.group_id}/${path}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CoRec-Bot-Token': internalToken, 'X-CoRec-Bot-User': String(binding.user_id) },
+    method: 'POST', headers,
     body: JSON.stringify(body), signal: AbortSignal.timeout(70000),
   })
   const data = await response.json().catch(() => ({}))
@@ -182,25 +197,30 @@ function validateExpense(value, binding, members) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== date) throw new Error('请提供账单日期。')
   if (!Number.isFinite(amount) || amount < 0.01 || amount > 100000000) throw new Error('请提供有效金额。')
   if (!(value.type === 'income' ? incomeCategories : categories).includes(value.category)) throw new Error('请提供账单分类。')
-  const payer = members.find((member) => member.displayName === value.payerName) || members.find((member) => member.id === binding.user_id)
-  if (!payer) throw new Error('无法找到群组成员，请检查账号绑定。')
+  const payerId = members
+    ? (members.find((member) => member.displayName === value.payerName) || members.find((member) => member.id === binding.user_id))?.id
+    : binding.user_id
+  if (!payerId) throw new Error('无法找到群组成员，请检查账号绑定。')
   const time = typeof value.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time) ? value.time : null
-  return { type: value.type, amount, date, time, category: value.category, payerId: payer.id,
+  return { type: value.type, amount, date, time, category: value.category, payerId,
     merchant: typeof value.merchant === 'string' && value.merchant.trim() ? value.merchant.trim().slice(0, 100) : value.category,
     productName: typeof value.productName === 'string' ? value.productName.trim().slice(0, 100) : '',
     note: typeof value.note === 'string' ? value.note.trim().slice(0, 250) : '' }
 }
 
-async function parseMessage(binding, messages) {
-  const [members] = await pool.execute('SELECT a.id, a.display_name AS displayName FROM group_members gm JOIN accounts a ON a.id = gm.user_id WHERE gm.group_id = ?', [binding.group_id])
+async function parseMessage(binding, messages, chat) {
+  const members = chat.groupOpenid ? null : (await pool.execute('SELECT a.id, a.display_name AS displayName FROM group_members gm JOIN accounts a ON a.id = gm.user_id WHERE gm.group_id = ?', [binding.group_id]))[0]
+  const payerInstruction = members
+    ? `群组成员：${members.map((member) => member.displayName).join('、')}。未指定付款人或收入归属时使用 ${binding.display_name}。`
+    : '付款人或收入归属固定为发送者，不需要填写名字。'
   const now = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TZ || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-  const system = `你是 CoRec 账本助手。今天是 ${now}。群组成员：${members.map((member) => member.displayName).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。用户发送文字或图片默认是记账，请读取图片和聊天中的账单。只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。未指定付款人或收入归属时使用 ${binding.display_name}。无需用户确认后即可保存，但不要声称已保存。`
+  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。用户发送文字或图片默认是记账，请读取图片和聊天中的账单。只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。无需用户确认后即可保存，但不要声称已保存。`
   const recent = messages.slice(-8)
   const history = recent.map((message, index) => ({ ...message, content: message.content.slice(0, index === recent.length - 1 ? 3000 : 100) }))
   const lastImage = history.findLastIndex((message) => message.image)
   const input = [{ role: 'system', content: system }, ...history.map((message, index) => ({ role: message.role, content: message.content || '请提取图片中的账单并记账。', ...(index === lastImage ? { image: message.image } : {}) }))]
   async function askModel(inputMessages) {
-    const data = await corecRequest(binding, 'llm/chat', { messages: inputMessages })
+    const data = await corecRequest(binding, 'llm/chat', { messages: inputMessages }, chat)
     const text = data.output_text || (data.output ? data.output.flatMap((item) => item.content || []).filter((item) => typeof item.text === 'string').map((item) => item.text).join('\n') : '') || data.choices?.[0]?.message?.content
     if (typeof text !== 'string') throw new Error('模型没有返回文本。')
     return extractJson(text)
@@ -217,60 +237,84 @@ function summary(expense) {
   return `${expense.date}${expense.time ? ` ${expense.time}` : ''} · ${expense.type === 'income' ? '收入' : '支出'} · ${expense.category} · ¥${Number(expense.amount).toFixed(2)}${expense.productName ? ` · ${expense.productName}` : ''}${expense.merchant && expense.merchant !== expense.category ? ` · ${expense.merchant}` : ''}`
 }
 
-async function handleMessage(openid, event) {
-  const text = (typeof event.content === 'string' ? event.content : '').trim().slice(0, 3000)
-  const bindMatch = /^绑定\s+([A-Fa-f0-9]{16})$/.exec(text)
-  if (bindMatch) {
-    const groupName = await bind(openid, bindMatch[1].toUpperCase())
-    return groupName ? `绑定成功，当前账本：${groupName}。` : '绑定码无效或已过期，请在 CoRec 群组面板重新生成。'
+async function handleMessage(chat, event) {
+  const { openid, groupOpenid } = chat
+  let text = (typeof event.content === 'string' ? event.content : '').trim().slice(0, 3000)
+  let binding
+  if (groupOpenid) {
+    text = text.replace(/^<@!?[A-Za-z0-9_-]+>\s*/, '')
+    if (text === '绑定') {
+      const code = await requestGroupBinding(pool, groupOpenid, openid)
+      return `请求码：${code}\n请在 CoRec 对应账本的「QQ 群聊绑定」中输入，有效期 10 分钟。`
+    }
+    if (/^确认绑定(?:\s|$)/.test(text)) {
+      const match = /^确认绑定\s+([A-Fa-f0-9]{16})$/.exec(text)
+      const confirmed = match && await confirmGroupBinding(pool, groupOpenid, openid, match[1].toUpperCase())
+      return confirmed ? '绑定成功。' : '无法确认绑定，请由发起绑定的成员在本群使用网页显示的有效确认码。'
+    }
+    if (/^绑定\s/.test(text)) return '群聊绑定请只发送“绑定”，再到 CoRec 网页输入机器人给出的请求码。'
+    binding = await getGroupBinding(pool, groupOpenid, openid)
+    if (!binding) return '请先加入对应的 CoRec 群组并完成绑定。加入后可 @机器人 发送“绑定”。'
+  } else {
+    const bindMatch = /^绑定\s+([A-Fa-f0-9]{16})$/.exec(text)
+    if (bindMatch) {
+      const groupName = await bind(openid, bindMatch[1].toUpperCase())
+      return groupName ? `绑定成功，当前账本：${groupName}。` : '绑定码无效或已过期，请在 CoRec 群组面板重新生成。'
+    }
+    binding = await getBinding(openid)
+    if (!binding) return '请先在 CoRec 群组面板生成绑定码，然后发送：绑定 绑定码'
   }
-  const binding = await getBinding(openid)
-  if (!binding) return '请先在 CoRec 群组面板生成绑定码，然后发送：绑定 绑定码'
-  const state = await getState(openid)
+
+  const state = await getState(chat, binding)
+  const saveState = (value) => setState(chat, binding, value)
+  const savedReply = (expense) => groupOpenid ? '已记入账本。' : `已记入 ${binding.group_name}：\n${summary(expense)}`
+  const duplicateReply = (title, duplicates) => {
+    const details = groupOpenid ? '' : `${duplicates.slice(0, 5).map(summary).join('\n')}\n`
+    const mention = groupOpenid ? '@机器人 ' : ''
+    return `${title}\n${details}${mention}回复“确认”继续，或回复“取消”。`
+  }
   if (state.pending && /^(取消|取消入账)$/.test(text)) {
-    await setState(openid, { messages: [] })
+    await saveState({ messages: [] })
     return '已取消这笔账单。'
   }
   if (state.pending && /^(确认|仍然入账)$/.test(text)) {
-    await requireCurrentBinding(openid, binding)
-    const result = await corecRequest(binding, 'expenses', { ...state.pending.expense, confirmedDuplicateIds: state.pending.duplicateIds })
+    await requireCurrentBinding(chat, binding)
+    const result = await corecRequest(binding, 'expenses', { ...state.pending.expense, confirmedDuplicateIds: state.pending.duplicateIds }, chat)
     if (result.duplicates) {
       state.pending.duplicateIds = result.duplicates.map((item) => item.id)
-      await setState(openid, state)
-      return `发现新的相似账单：\n${result.duplicates.slice(0, 5).map(summary).join('\n')}\n回复“确认”继续，或回复“取消”。`
+      await saveState(state)
+      return duplicateReply('发现新的相似账单：', result.duplicates)
     }
-    await setState(openid, { messages: [] })
-    return `已记入 ${binding.group_name}：\n${summary(result.expense)}`
+    await saveState({ messages: [] })
+    return savedReply(result.expense)
   }
   if (state.pending) return '有一笔可能重复的账单等待处理，请回复“确认”或“取消”。'
-  if (/^(取消|重新开始)$/.test(text)) { await setState(openid, { messages: [] }); return '已清除本次待处理内容。' }
+  if (/^(取消|重新开始)$/.test(text)) { await saveState({ messages: [] }); return '已清除本次待处理内容。' }
   const attachments = Array.isArray(event.attachments) ? event.attachments : []
   const imageAttachment = attachments.find((item) => typeof item.url === 'string' && ((typeof item.content_type === 'string' && item.content_type.startsWith('image/')) || (item.width && item.height)))
   if (!text && !imageAttachment) return '请发送账单文字或图片。'
   const image = imageAttachment ? await readImage(imageAttachment) : undefined
   const previousMessages = image ? state.messages.map(({ image: _image, ...message }) => message) : state.messages
   const messages = [...previousMessages, { role: 'user', content: text || '请提取图片中的账单并记账。', ...(image ? { image } : {}) }].slice(-10)
-  const result = await parseMessage(binding, messages)
+  const result = await parseMessage(binding, messages, chat)
   if (!result.expense) {
     const answer = /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply) ? result.reply : `${result.reply}\n请补充账单的收支类型、金额、日期和分类。`
-    await setState(openid, { messages: [...messages, { role: 'assistant', content: answer }].slice(-10) })
+    await saveState({ messages: [...messages, { role: 'assistant', content: answer }].slice(-10) })
     return answer
   }
-  await requireCurrentBinding(openid, binding)
-  const saved = await corecRequest(binding, 'expenses', result.expense)
+  await requireCurrentBinding(chat, binding)
+  const saved = await corecRequest(binding, 'expenses', result.expense, chat)
   if (saved.duplicates) {
-    await setState(openid, { messages: [], pending: { expense: result.expense, duplicateIds: saved.duplicates.map((item) => item.id) } })
-    return `发现可能重复的账单：\n${saved.duplicates.slice(0, 5).map(summary).join('\n')}\n回复“确认”继续，或回复“取消”。`
+    await saveState({ messages: [], pending: { expense: result.expense, duplicateIds: saved.duplicates.map((item) => item.id) } })
+    return duplicateReply('发现可能重复的账单：', saved.duplicates)
   }
-  await setState(openid, { messages: [] })
-  return `已记入 ${binding.group_name}：\n${summary(saved.expense)}`
+  await saveState({ messages: [] })
+  return savedReply(saved.expense)
 }
 
-async function processEvent(event) {
-  const openid = event?.author?.user_openid || event?.author?.id
-  const messageId = event?.id
-  if (typeof openid !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(openid) || typeof messageId !== 'string' || !messageId || messageId.length > 512) return
-  const messageHash = hash(messageId)
+async function processEvent(chat, event) {
+  const messageId = event.id
+  const messageHash = hash(chat.groupOpenid ? `group:${chat.groupOpenid}:${messageId}` : messageId)
   try {
     await pool.execute('INSERT INTO qq_processed_messages (message_hash) VALUES (?)', [messageHash])
   } catch (error) {
@@ -278,20 +322,25 @@ async function processEvent(event) {
     throw error
   }
   let output
-  try { output = await handleMessage(openid, event) } catch (error) {
+  try { output = await handleMessage(chat, event) } catch (error) {
     console.error('QQ message processing failed:', error.message)
-    output = `处理失败：${error.message || '请稍后重试。'}`
+    output = chat.groupOpenid ? '处理失败，请稍后重试。' : `处理失败：${error.message || '请稍后重试。'}`
   }
-  await reply(openid, messageId, output)
+  await reply(chat, messageId, output)
 }
 
-function queueEvent(event) {
-  const openid = event?.author?.user_openid || event?.author?.id
-  if (!openid) return
-  const previous = queues.get(openid) || Promise.resolve()
-  const next = previous.catch(() => {}).then(() => processEvent(event)).catch((error) => console.error('QQ event failed:', error.message))
-  queues.set(openid, next)
-  next.finally(() => { if (queues.get(openid) === next) queues.delete(openid) })
+function queueEvent(event, isGroup = false) {
+  const groupOpenid = isGroup ? event?.group_openid : null
+  const openid = isGroup ? event?.author?.member_openid : (event?.author?.user_openid || event?.author?.id)
+  if (isGroup && (typeof groupOpenid !== 'string' || !qqOpenidPattern.test(groupOpenid))) return
+  if (typeof openid !== 'string' || !qqOpenidPattern.test(openid) || typeof event?.id !== 'string' || !event.id || event.id.length > 512) return
+
+  const chat = { openid, groupOpenid }
+  const key = groupOpenid ? `group:${groupOpenid}:${openid}` : openid
+  const previous = queues.get(key) || Promise.resolve()
+  const next = previous.then(() => processEvent(chat, event)).catch((error) => console.error('QQ event failed:', error.message))
+  queues.set(key, next)
+  next.finally(() => { if (queues.get(key) === next) queues.delete(key) })
 }
 
 async function connect() {
@@ -322,6 +371,7 @@ async function connect() {
     else if (packet.op === 9) { sessionId = ''; lastSequence = null; socket.close() }
     else if (packet.op === 0 && packet.t === 'READY') { sessionId = packet.d?.session_id || ''; console.log('QQ Bot connected.') }
     else if (packet.op === 0 && packet.t === 'C2C_MESSAGE_CREATE') queueEvent(packet.d)
+    else if (packet.op === 0 && packet.t === 'GROUP_AT_MESSAGE_CREATE') queueEvent(packet.d, true)
   })
   await new Promise((resolve) => {
     socket.addEventListener('error', () => console.error('QQ gateway connection error.'))
@@ -339,6 +389,8 @@ async function start() {
     try {
       await pool.execute('DELETE FROM qq_bind_codes WHERE expires_at <= UTC_TIMESTAMP()')
       await pool.execute('DELETE FROM qq_conversations WHERE updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY)')
+      await pool.execute('DELETE FROM qq_group_bind_requests WHERE expires_at <= UTC_TIMESTAMP()')
+      await pool.execute('UPDATE qq_group_members SET state = NULL, state_updated_at = NULL WHERE state_updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)')
       await pool.execute('DELETE FROM qq_processed_messages WHERE created_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 7 DAY)')
     } catch (error) { console.error('QQ cleanup failed:', error.message) }
   }

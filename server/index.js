@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser'
 import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import mysql from 'mysql2/promise'
+import { claimGroupBinding, ensureQqGroupSchema, getGroupBinding, getGroupBindingStatus, groupCodePattern, qqOpenidPattern, removeGroupBinding } from './qq-group.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -102,6 +103,14 @@ async function requireAuth(request, response, next) {
       const [users] = await pool.execute('SELECT id, username, display_name FROM accounts WHERE id = ?', [userId])
       if (!users.length) return response.status(401).json({ error: '服务账号无效。' })
       request.user = { id: users[0].id, username: users[0].username, displayName: users[0].display_name }
+      const groupOpenid = request.get('X-CoRec-QQ-Group')
+      const memberOpenid = request.get('X-CoRec-QQ-Member')
+      if (groupOpenid !== undefined || memberOpenid !== undefined) {
+        if (!qqOpenidPattern.test(groupOpenid || '') || !qqOpenidPattern.test(memberOpenid || '')) {
+          return response.status(400).json({ error: 'QQ 群身份无效。' })
+        }
+        request.qqGroup = { groupOpenid, memberOpenid }
+      }
       return next()
     }
     const token = request.cookies[cookieName]
@@ -139,11 +148,19 @@ async function requireGroupMember(request, response, next) {
       LIMIT 1
     `, [groupId, request.user.id])
     if (!rows.length) return response.status(404).json({ error: '找不到这个群组。' })
+    if (!await hasCurrentQqGroupBinding(pool, request, groupId)) return response.status(403).json({ error: 'QQ 群绑定已失效。' })
     request.group = rows[0]
     next()
   } catch (error) {
     next(error)
   }
+}
+
+async function hasCurrentQqGroupBinding(connection, request, groupId) {
+  if (!request.qqGroup) return true
+  const { groupOpenid, memberOpenid } = request.qqGroup
+  const binding = await getGroupBinding(connection, groupOpenid, memberOpenid)
+  return binding?.group_id === groupId && binding.user_id === request.user.id
 }
 
 function isNonPublicAddress(address) {
@@ -302,6 +319,7 @@ async function ensureSchema() {
     message_hash CHAR(64) PRIMARY KEY, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX qq_processed_created_idx (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
+  await ensureQqGroupSchema(pool)
 }
 
 app.get('/api/health', async (_request, response) => {
@@ -466,6 +484,30 @@ app.get('/api/qq/binding', requireAuth, async (request, response) => {
   response.json({ binding: rows.length ? { groupId: rows[0].group_id, groupName: rows[0].group_name } : null })
 })
 
+const qqGroupBindingPath = '/api/groups/:groupId/qq/group-binding'
+
+app.get(qqGroupBindingPath, requireAuth, requireGroupMember, async (request, response) => {
+  const status = await getGroupBindingStatus(pool, request.group.id, request.user.id)
+  response.json({ ...status, canManage: request.group.role === 'owner' })
+})
+
+app.post(qqGroupBindingPath, requireAuth, requireGroupMember, async (request, response) => {
+  if ((process.env.QQ_BOT_INTERNAL_TOKEN || '').length < 32) return response.status(503).json({ error: 'QQ Bot 尚未配置。' })
+  const requestCode = typeof request.body?.code === 'string' ? request.body.code.trim().toUpperCase() : ''
+  if (!groupCodePattern.test(requestCode)) return response.status(400).json({ error: '请输入 16 位 QQ 群绑定请求码。' })
+  const result = await claimGroupBinding(pool, request.group.id, request.user.id, requestCode)
+  if (result.error) return response.status(400).json(result)
+  response.set('Cache-Control', 'no-store').json(result)
+})
+
+app.delete(qqGroupBindingPath, requireAuth, requireGroupMember, async (request, response) => {
+  const { scope } = request.query
+  if (scope !== 'group' && scope !== 'member') return response.status(400).json({ error: '解绑范围无效。' })
+  const removed = await removeGroupBinding(pool, request.group.id, request.user.id, scope === 'group')
+  if (!removed) return response.status(403).json({ error: '只有该 CoRec 群组的创建者可以解除 QQ 群绑定。' })
+  response.json({ ok: true })
+})
+
 app.get('/api/groups/:groupId/llm/config', requireAuth, requireGroupMember, (_request, response) => {
   const config = getLlmConfig()
   const configured = Boolean(config.baseUrl && config.apiKey && config.model && ['chat-completions', 'responses'].includes(config.apiFormat))
@@ -588,19 +630,26 @@ app.get('/api/groups/:groupId/analytics', requireAuth, requireGroupMember, async
 
 app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (request, response) => {
   const month = request.query.month
-  if (typeof month !== 'string' || !monthPattern.test(month)) {
+  const allMonths = month === 'all'
+  if (typeof month !== 'string' || (!allMonths && !monthPattern.test(month))) {
     return response.status(400).json({ error: '月份格式无效。' })
   }
-  const [year, monthNumber] = month.split('-').map(Number)
-  const nextMonth = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10)
+  const conditions = ['e.group_id = ?']
+  const parameters = [request.group.id]
+  if (!allMonths) {
+    const [year, monthNumber] = month.split('-').map(Number)
+    const nextMonth = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10)
+    conditions.push('e.date >= ?', 'e.date < ?')
+    parameters.push(`${month}-01`, nextMonth)
+  }
   const [rows] = await pool.execute(`
     SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
       e.entry_type, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
     FROM expenses e
     LEFT JOIN accounts a ON a.id = e.payer_user_id
-    WHERE e.group_id = ? AND e.date >= ? AND e.date < ?
+    WHERE ${conditions.join(' AND ')}
     ORDER BY e.date DESC, e.transaction_time DESC, e.id DESC
-  `, [request.group.id, `${month}-01`, nextMonth])
+  `, parameters)
   const [balanceRows] = await pool.execute(`
     SELECT COALESCE(SUM(CASE
       WHEN entry_type = 'income' THEN amount_cents
@@ -618,6 +667,9 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   const parsedDate = typeof date === 'string' && datePattern.test(date) ? new Date(`${date}T00:00:00Z`) : null
   const validDate = parsedDate && !Number.isNaN(parsedDate.valueOf()) && parsedDate.toISOString().slice(0, 10) === date
   const payerUserId = Number(payerId)
+  if (request.qqGroup && payerUserId !== request.user.id) {
+    return response.status(403).json({ error: 'QQ 群记账仅支持记在发送者名下。' })
+  }
 
   if (!validDate || typeof merchant !== 'string' || !merchant.trim() || merchant.trim().length > 100) {
     return response.status(400).json({ error: '请填写有效日期和账单名称。' })
@@ -654,6 +706,10 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   try {
     await connection.beginTransaction()
     await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
+    if (!await hasCurrentQqGroupBinding(connection, request, request.group.id)) {
+      await connection.rollback()
+      return response.status(403).json({ error: 'QQ 群绑定已失效。' })
+    }
     const [duplicates] = await connection.execute(`
       SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time,
         e.merchant, e.product_name, e.note, e.category, e.entry_type, e.amount_cents, e.payer_user_id,

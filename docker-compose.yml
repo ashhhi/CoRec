@@ -55,7 +55,6 @@ services:
         condition: service_healthy
 
   qqbot:
-    profiles: ["qqbot"]
     build:
       context: .
       dockerfile: Dockerfile.api
