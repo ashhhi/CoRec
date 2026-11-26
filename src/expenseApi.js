@@ -1,6 +1,13 @@
-import { entryLabel } from '../server/ledger-protocol.js'
+import { entryLabel, incomeAllocationLabel } from '../server/ledger-protocol.js'
 export async function saveExpense(groupId, expense, confirmedDuplicateIds = []) {
-  const { duplicates, saved, dismissed, ...fields } = expense
+  return submitExpenses(groupId, expense, confirmedDuplicateIds)
+}
+
+export async function saveExpenses(groupId, expenses, confirmedDuplicateIds = []) {
+  return submitExpenses(groupId, { expenses }, confirmedDuplicateIds)
+}
+
+async function submitExpenses(groupId, fields, confirmedDuplicateIds) {
   const response = await fetch(`/api/groups/${groupId}/expenses`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -14,5 +21,5 @@ export async function saveExpense(groupId, expense, confirmedDuplicateIds = []) 
 
 export function describeDuplicate(item) {
   const name = item.productName || (item.merchant !== item.category ? item.merchant : '') || item.category
-  return [item.date, item.time, item.type === 'transfer' ? entryLabel(item) : item.category, name !== item.category ? name : '', `¥${Number(item.amount).toFixed(2)}`, item.payer].filter(Boolean).join(' · ')
+  return [item.date, item.time, item.type === 'transfer' ? entryLabel(item) : item.category, name !== item.category ? name : '', `¥${Number(item.amount).toFixed(2)}`, incomeAllocationLabel(item), item.payer].filter(Boolean).join(' · ')
 }

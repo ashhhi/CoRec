@@ -5,7 +5,7 @@ import mysql from 'mysql2/promise'
 import { qqToken, qqRequest } from './qq-api.js'
 import { taskInstructions, taskTimeNow } from './task-protocol.js'
 import { recurrenceLabel } from './task-recurrence.js'
-import { entryLabel, transferDirections, savingsInstructions } from './ledger-protocol.js'
+import { entryLabel, transferDirections, savingsInstructions, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions } from './ledger-protocol.js'
 import { confirmGroupBinding, getGroupBinding, qqOpenidPattern, requestGroupBinding } from './qq-group.js'
 
 const appId = process.env.QQ_BOT_APP_ID?.trim()
@@ -178,7 +178,7 @@ function validateExpense(value, binding, members) {
     : binding.user_id
   if (!payerId) throw new Error('无法找到群组成员，请检查账号绑定。')
   const time = typeof value.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time) ? value.time : null
-  return { type: value.type, transferDirection: value.type === 'transfer' ? value.transferDirection : null, amount, date, time, category: value.category, payerId,
+  return { type: value.type, transferDirection: value.type === 'transfer' ? value.transferDirection : null, savingsAmount: validateIncomeSavings(value.type, amount, value.savingsAmount), amount, date, time, category: value.category, payerId,
     merchant: typeof value.merchant === 'string' && value.merchant.trim() ? value.merchant.trim().slice(0, 100) : value.category,
     productName: typeof value.productName === 'string' ? value.productName.trim().slice(0, 100) : '',
     note: typeof value.note === 'string' ? value.note.trim().slice(0, 250) : '' }
@@ -191,9 +191,9 @@ async function parseMessage(binding, messages, chat, automatic = false) {
     : '付款人或收入归属固定为发送者，不需要填写名字。'
   const now = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TZ || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
   const purpose = automatic
-    ? '这是一条发在群里的普通消息。只有最新消息描述实际发生的收支、明确请求任务/提醒，或补充前文信息，才提取或追问。闲聊、报价、计划购买、无关图片或单独的数量返回 {"reply":"","expense":null}。不要把商品数量当成金额。'
+    ? '这是一条发在群里的普通消息。只有最新消息描述实际发生的收支、明确请求任务/提醒，或补充前文信息，才提取或追问。闲聊、报价、计划购买、无关图片或单独的数量返回 {"reply":"","expenses":[]}。不要把商品数量当成金额。'
     : '用户可能要求记账或任务提醒。按最新意图处理；图片默认记账。'
-  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。${savingsInstructions()}${taskInstructions(taskTimeNow())}`
+  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expenses":[]}。明确收支类型、实际金额、日期、分类后，expenses 中每笔为 {"type":"expense、income或transfer","savingsAmount":数字,"amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expenses 为空数组；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。${savingsInstructions()}${batchInstructions()}${taskInstructions(taskTimeNow())}`
   const recent = messages.slice(-8)
   const history = recent.map((message, index) => ({ ...message, content: message.content.slice(0, index === recent.length - 1 ? 3000 : 100) }))
   const lastImage = history.findLastIndex((message) => message.image)
@@ -211,16 +211,19 @@ async function parseMessage(binding, messages, chat, automatic = false) {
     return extractJson(text)
   }
   let result = await askModel(input)
-  if (!automatic && lastImage >= 0 && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && typeof result.reply === 'string' && !/[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply)) {
-    result = await askModel([{ ...input[0], content: `${system} 不要只描述图片。信息齐全时必须返回 expense，信息不全时请具体追问。` }, ...input.slice(1)])
+  if (!automatic && lastImage >= 0 && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && !result.expenses?.length && typeof result.reply === 'string' && !/[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply)) {
+    result = await askModel([{ ...input[0], content: `${system} 不要只描述图片。信息齐全时必须返回 expenses 数组，信息不全时请具体追问。` }, ...input.slice(1)])
   }
   if (result.intent === 'task' || result.task || result.taskAction) return { reply: typeof result.reply === 'string' ? result.reply.trim() : '请补充任务时间和内容。', intent: 'task', task: result.task, taskAction: result.taskAction }
-  try { return { reply: typeof result.reply === 'string' ? result.reply.trim() : automatic ? '' : '请补充账单信息。', expense: validateExpense(result.expense, binding, members) } }
-  catch (error) { return { reply: error.message, expense: null } }
+  try {
+    const expenses = expenseValues(result).map((value) => validateExpense(value, binding, members))
+    return { reply: typeof result.reply === 'string' ? result.reply.trim() : automatic ? '' : '请补充账单信息。', expenses, expense: expenses.length === 1 ? expenses[0] : null }
+  }
+  catch (error) { return { reply: error.message, expense: null, expenses: [] } }
 }
 
 function summary(expense) {
-  return `${expense.date}${expense.time ? ` ${expense.time}` : ''} · ${entryLabel(expense)} · ${expense.category} · ¥${Number(expense.amount).toFixed(2)}${expense.productName ? ` · ${expense.productName}` : ''}${expense.merchant && expense.merchant !== expense.category ? ` · ${expense.merchant}` : ''}`
+  return `${expense.date}${expense.time ? ` ${expense.time}` : ''} · ${entryLabel(expense)} · ${expense.category} · ¥${Number(expense.amount).toFixed(2)}${expense.type === 'income' ? ` · ${incomeAllocationLabel(expense)}` : ''}${expense.productName ? ` · ${expense.productName}` : ''}${expense.merchant && expense.merchant !== expense.category ? ` · ${expense.merchant}` : ''}`
 }
 
 function findImage(attachments) {
@@ -300,13 +303,16 @@ async function handleMessage(chat, event, message) {
   const cancelsEntry = /^(取消|取消入账)$/.test(text)
   const resetsEntry = text === '重新开始' || (groupOpenid && text === '重新记账')
   if (mode === 'automatic' && pending) return
-  if (mode === 'task' && pending) return '有一笔可能重复的账单等待处理，请先发送「确认入账」或「取消入账」，然后再安排任务。'
+  if (mode === 'task' && pending) return '有一批可能重复的账单等待处理，请先发送「确认入账」或「取消入账」，然后再安排任务。'
   if (continuation) {
     if (pending) {
       if (!confirmsEntry && !cancelsEntry && !resetsEntry) return
     } else if (state.messages.at(-1)?.role !== 'assistant') return
   }
-  const savedReply = (expense) => groupOpenid ? '已记入账本。' : `已记入 ${binding.group_name}：\n${summary(expense)}`
+  const savedReply = (expenses) => {
+    const heading = `已将 ${expenses.length} 笔账单记入${groupOpenid ? '账本' : ` ${binding.group_name}`}。`
+    return `${heading}\n${expenses.slice(0, 8).map(summary).join('\n')}${expenses.length > 8 ? '\n其余记录请到网页账本查看。' : ''}`
+  }
   const duplicateReply = (title, duplicates) => {
     if (groupOpenid) return `${title}\n发送「确认入账」或「取消入账」。如果群里只接收 @ 消息，请先 @机器人。`
     const details = duplicates.slice(0, 5).map(summary).join('\n')
@@ -314,20 +320,20 @@ async function handleMessage(chat, event, message) {
   }
   if (pending && (cancelsEntry || (groupOpenid && resetsEntry))) {
     await saveState({ messages: [] })
-    return '已取消这笔账单。'
+    return '已取消这批账单。'
   }
   if (pending && confirmsEntry) {
     await requireCurrentBinding(chat, binding)
-    const result = await corecRequest(binding, 'expenses', { ...pending.expense, confirmedDuplicateIds: pending.duplicateIds }, chat)
+    const result = await corecRequest(binding, 'expenses', { expenses: pending.expenses || [pending.expense], confirmedDuplicateIds: pending.duplicateIds }, chat)
     if (result.duplicates) {
       pending.duplicateIds = result.duplicates.map((item) => item.id)
       await saveState(state)
       return duplicateReply('发现新的相似账单：', result.duplicates)
     }
     await saveState({ messages: [] })
-    return savedReply(result.expense)
+    return savedReply(result.expenses)
   }
-  if (pending) return groupOpenid ? duplicateReply('有一笔可能重复的账单等待处理。', []) : '有一笔可能重复的账单等待处理，请回复“确认”或“取消”。'
+  if (pending) return groupOpenid ? duplicateReply('有一批可能重复的账单等待处理。', []) : '有一批可能重复的账单等待处理，请回复“确认”或“取消”。'
   if (resetsEntry || text === '取消' || (groupOpenid && text === '取消入账')) {
     if (mode === 'follow-up' && !state.messages.length) return
     await saveState({ messages: [] })
@@ -365,7 +371,7 @@ async function handleMessage(chat, event, message) {
     await saveState({ intent: 'task', messages: [...messages, { role: 'assistant', content: result.reply }].slice(-10) })
     return result.reply
   }
-  if (!result.expense) {
+  if (!result.expenses?.length) {
     if (automatic && !result.reply) return
     let answer = /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply) ? result.reply : `${result.reply}\n请补充账单的收支类型、金额、日期和分类。`
     if (groupOpenid) answer += '\n群内已开启全部消息接收时，10 分钟内直接回复即可继续；否则请 @机器人 回复。'
@@ -373,13 +379,13 @@ async function handleMessage(chat, event, message) {
     return answer
   }
   await requireCurrentBinding(chat, binding)
-  const saved = await corecRequest(binding, 'expenses', result.expense, chat)
+  const saved = await corecRequest(binding, 'expenses', { expenses: result.expenses }, chat)
   if (saved.duplicates) {
-    await saveState({ messages: [], pending: { expense: result.expense, duplicateIds: saved.duplicates.map((item) => item.id) } })
-    return duplicateReply('发现可能重复的账单：', saved.duplicates)
+    await saveState({ messages: [], pending: { expenses: result.expenses, duplicateIds: saved.duplicates.map((item) => item.id) } })
+    return duplicateReply('发现可能重复的账单，这批尚未保存：', saved.duplicates)
   }
   await saveState({ messages: [] })
-  return savedReply(saved.expense)
+  return savedReply(saved.expenses)
 }
 
 async function processEvent(chat, event, message) {

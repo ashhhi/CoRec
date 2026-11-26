@@ -11,6 +11,7 @@ import { ensureGroupSchema, GroupError, managesGroup, registerGroupRoutes } from
 import { ensureTaskSchema, registerTaskRoutes, startTaskWorker } from './tasks.js'
 import { sendTaskNotification } from './qq-api.js'
 import { getAccountBalances } from './ledger.js'
+import { validateIncomeSavings } from './ledger-protocol.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -71,6 +72,7 @@ function serializeExpense(row) {
     note: row.note,
     category: row.category,
     amount: Number(row.amount_cents) / 100,
+    savingsAmount: Number(row.income_savings_cents || 0) / 100,
     payerId: row.payer_user_id,
     payer: row.payer_name,
   }
@@ -276,6 +278,7 @@ async function ensureSchema() {
       note VARCHAR(250) NOT NULL DEFAULT '',
       category VARCHAR(20) NOT NULL,
       amount_cents BIGINT UNSIGNED NOT NULL,
+      income_savings_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
       payer_user_id INT UNSIGNED NULL,
       payer VARCHAR(80) NOT NULL,
       created_by INT UNSIGNED NOT NULL,
@@ -294,6 +297,7 @@ async function ensureSchema() {
   if (!names.has('entry_type')) await pool.query("ALTER TABLE expenses ADD COLUMN entry_type ENUM('expense', 'income') NOT NULL DEFAULT 'expense' AFTER id")
   if (!columns.find((column)=>column.Field === 'entry_type')?.Type.includes("'transfer'")) await pool.query("ALTER TABLE expenses MODIFY entry_type ENUM('expense','income','transfer') NOT NULL DEFAULT 'expense'")
   if (!names.has('transfer_direction')) await pool.query("ALTER TABLE expenses ADD COLUMN transfer_direction ENUM('to_savings','from_savings') NULL AFTER entry_type")
+  if (!names.has('income_savings_cents')) await pool.query('ALTER TABLE expenses ADD COLUMN income_savings_cents BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER amount_cents')
   if (!names.has('product_name')) await pool.query("ALTER TABLE expenses ADD COLUMN product_name VARCHAR(100) NOT NULL DEFAULT '' AFTER merchant")
   if (!names.has('transaction_time')) await pool.query('ALTER TABLE expenses ADD COLUMN transaction_time TIME NULL AFTER date')
   if (!names.has('group_id')) await pool.query('ALTER TABLE expenses ADD COLUMN group_id INT UNSIGNED NULL AFTER id')
@@ -663,7 +667,7 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
   }
   const [rows] = await pool.execute(`
     SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
-      e.entry_type, e.transfer_direction, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
+      e.entry_type, e.transfer_direction, e.amount_cents, e.income_savings_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
     FROM expenses e
     LEFT JOIN accounts a ON a.id = e.payer_user_id
     WHERE ${conditions.join(' AND ')}
@@ -673,95 +677,95 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
   response.json({ expenses: rows.map(serializeExpense), balance: balances.activityCents / 100, savingsBalance: balances.savingsCents / 100 })
 })
 
-app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async (request, response) => {
-  const { date, time = null, merchant, productName = '', note = '', category, amount, payerId, type = 'expense', transferDirection = null, confirmedDuplicateIds = [] } = request.body || {}
+function validateExpenseInput(value, request) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new GroupError(400, '账单内容无效。')
+  const { date, time = null, merchant, productName = '', note = '', category, amount, savingsAmount = 0, payerId, type = 'expense', transferDirection = null } = value
   const parsedAmount = Number(amount)
   const parsedDate = typeof date === 'string' && datePattern.test(date) ? new Date(`${date}T00:00:00Z`) : null
   const validDate = parsedDate && !Number.isNaN(parsedDate.valueOf()) && parsedDate.toISOString().slice(0, 10) === date
   const payerUserId = Number(payerId)
-  if (request.qqGroup && payerUserId !== request.user.id) {
-    return response.status(403).json({ error: 'QQ 群记账仅支持记在发送者名下。' })
-  }
-
-  if (!validDate || typeof merchant !== 'string' || !merchant.trim() || merchant.trim().length > 100) {
-    return response.status(400).json({ error: '请填写有效日期和账单名称。' })
-  }
-  if (time !== null && (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) {
-    return response.status(400).json({ error: '时间格式无效。' })
-  }
-  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || parsedAmount > 100000000) {
-    return response.status(400).json({ error: '请输入有效金额。' })
-  }
+  if (request.qqGroup && payerUserId !== request.user.id) throw new GroupError(403, 'QQ 群记账仅支持记在发送者名下。')
+  if (!validDate || typeof merchant !== 'string' || !merchant.trim() || merchant.trim().length > 100) throw new GroupError(400, '请填写有效日期和账单名称。')
+  if (time !== null && (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) throw new GroupError(400, '时间格式无效。')
+  if (!Number.isFinite(parsedAmount) || parsedAmount < 0.01 || parsedAmount > 100000000) throw new GroupError(400, '请输入有效金额。')
   const allowedCategories = type === 'transfer' ? new Set(['存款']) : type === 'income' ? incomeCategories : categories
-  if (!['expense', 'income', 'transfer'].includes(type) || !allowedCategories.has(category) || !Number.isSafeInteger(payerUserId) || payerUserId < 1) {
-    return response.status(400).json({ error: '账目类型、分类或成员无效。' })
+  if (!['expense', 'income', 'transfer'].includes(type) || !allowedCategories.has(category) || !Number.isSafeInteger(payerUserId) || payerUserId < 1) throw new GroupError(400, '账目类型、分类或成员无效。')
+  if (type === 'transfer' ? !['to_savings', 'from_savings'].includes(transferDirection) : transferDirection !== null) throw new GroupError(400, '账户转账方向无效。')
+  let incomeSavingsCents
+  try {
+    incomeSavingsCents = Math.round(validateIncomeSavings(type, parsedAmount, savingsAmount) * 100)
+  } catch (error) {
+    throw new GroupError(400, error.message)
   }
-  if (type === 'transfer' ? !['to_savings','from_savings'].includes(transferDirection) : transferDirection !== null) return response.status(400).json({ error: '账户转账方向无效。' })
-  if (typeof note !== 'string' || note.length > 250) {
-    return response.status(400).json({ error: '备注不能超过 250 个字符。' })
-  }
-  if (typeof productName !== 'string' || productName.trim().length > 100) {
-    return response.status(400).json({ error: '商品名不能超过 100 个字符。' })
-  }
-  if (!Array.isArray(confirmedDuplicateIds) || !confirmedDuplicateIds.every((id) => Number.isSafeInteger(id) && id > 0)) {
-    return response.status(400).json({ error: '重复账单确认信息无效。' })
-  }
-  const [payers] = await pool.execute(`
-    SELECT a.display_name
-    FROM group_members gm JOIN accounts a ON a.id = gm.user_id
-    WHERE gm.group_id = ? AND gm.user_id = ?
-    LIMIT 1
-  `, [request.group.id, payerUserId])
-  if (!payers.length) return response.status(400).json({ error: '付款人必须是群组成员。' })
+  if (typeof note !== 'string' || note.length > 250) throw new GroupError(400, '备注不能超过 250 个字符。')
+  if (typeof productName !== 'string' || productName.trim().length > 100) throw new GroupError(400, '商品名不能超过 100 个字符。')
+  return { date, time, merchant: merchant.trim(), productName: productName.trim(), note: note.trim(), category, type, transferDirection, amountCents: Math.round(parsedAmount * 100), incomeSavingsCents, payerUserId }
+}
 
-  const amountCents = Math.round(parsedAmount * 100)
+app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async (request, response) => {
+  const batch = Object.hasOwn(request.body || {}, 'expenses')
+  const input = batch ? request.body.expenses : [request.body]
+  if (!Array.isArray(input) || input.length < 1 || input.length > 50) throw new GroupError(400, '每次请提交 1 到 50 笔账单。')
+  const entries = input.map((value, index) => {
+    try { return validateExpenseInput(value, request) }
+    catch (error) { throw new GroupError(error.status || 400, `${batch ? `第 ${index + 1} 笔：` : ''}${error.message}`) }
+  })
+  const confirmedDuplicateIds = request.body?.confirmedDuplicateIds || []
+  if (!Array.isArray(confirmedDuplicateIds) || !confirmedDuplicateIds.every((id) => Number.isSafeInteger(id) && id > 0)) throw new GroupError(400, '重复账单确认信息无效。')
   const connection = await pool.getConnection()
   try {
     await connection.beginTransaction()
     await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
-    const [[currentMember]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
-    const [[currentPayer]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, payerUserId])
-    if (!currentMember || !currentPayer) {
-      await connection.rollback()
-      return response.status(403).json({ error: '群组成员已变更，请刷新后重试。' })
+    const [members] = await connection.execute(`SELECT a.id, a.display_name FROM group_members gm
+      JOIN accounts a ON a.id=gm.user_id WHERE gm.group_id=?`, [request.group.id])
+    const payerNames = new Map(members.map((member) => [member.id, member.display_name]))
+    if (!payerNames.has(request.user.id) || entries.some((entry) => !payerNames.has(entry.payerUserId))) throw new GroupError(403, '群组成员已变更，请刷新后重试。')
+    if (!await hasCurrentQqGroupBinding(connection, request, request.group.id)) throw new GroupError(403, 'QQ 群绑定已失效。')
+
+    // Check the whole batch before inserting any rows, including duplicate confirmations.
+    const duplicates = new Map()
+    for (const entry of entries) {
+      const [rows] = await connection.execute(`
+        SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time,
+          e.merchant, e.product_name, e.note, e.category, e.entry_type, e.transfer_direction, e.amount_cents, e.income_savings_cents,
+          e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
+        FROM expenses e LEFT JOIN accounts a ON a.id=e.payer_user_id
+        WHERE e.group_id=? AND e.date=? AND e.entry_type=? AND e.amount_cents=? AND e.transfer_direction <=> ?
+        ORDER BY e.id DESC
+      `, [request.group.id, entry.date, entry.type, entry.amountCents, entry.transferDirection])
+      for (const row of rows) duplicates.set(row.id, row)
     }
-    if (!await hasCurrentQqGroupBinding(connection, request, request.group.id)) {
+    if ([...duplicates.keys()].some((id) => !confirmedDuplicateIds.includes(id))) {
       await connection.rollback()
-      return response.status(403).json({ error: 'QQ 群绑定已失效。' })
+      return response.status(409).json({ code: 'POSSIBLE_DUPLICATE', error: '发现可能重复的账单，整批尚未保存，请确认是否继续。', duplicates: [...duplicates.values()].map(serializeExpense) })
     }
-    if (type === 'transfer' && transferDirection === 'from_savings') {
+    if (entries.some((entry) => entry.transferDirection === 'from_savings')) {
       const balances = await getAccountBalances(connection, request.group.id)
-      if (balances.savingsCents < amountCents) throw new GroupError(400, '存款余额不足，请先记录存入存款的金额。')
+      const savingsChange = entries.reduce((sum, entry) => sum + (entry.type === 'income' ? entry.incomeSavingsCents : entry.type !== 'transfer' ? 0 : entry.transferDirection === 'to_savings' ? entry.amountCents : -entry.amountCents), 0)
+      if (balances.savingsCents + savingsChange < 0) throw new GroupError(400, '存款余额不足，这批账单尚未保存。')
     }
-    const [duplicates] = await connection.execute(`
-      SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time,
-        e.merchant, e.product_name, e.note, e.category, e.entry_type, e.transfer_direction, e.amount_cents, e.payer_user_id,
-        COALESCE(a.display_name, e.payer) AS payer_name
-      FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id
-      WHERE e.group_id = ? AND e.date = ? AND e.entry_type = ? AND e.amount_cents = ? AND e.transfer_direction <=> ?
-      ORDER BY e.id DESC
-    `, [request.group.id, date, type, amountCents, transferDirection])
-    if (duplicates.some((row) => !confirmedDuplicateIds.includes(row.id))) {
-      await connection.rollback()
-      return response.status(409).json({ code: 'POSSIBLE_DUPLICATE', error: '发现可能重复的账单，请确认是否继续。', duplicates: duplicates.map(serializeExpense) })
+    const ids = []
+    for (const entry of entries) {
+      const [result] = await connection.execute(`
+        INSERT INTO expenses (entry_type, transfer_direction, group_id, date, transaction_time, merchant, product_name, note, category, amount_cents, income_savings_cents, payer_user_id, payer, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [entry.type, entry.transferDirection, request.group.id, entry.date, entry.time, entry.merchant, entry.productName, entry.note, entry.category, entry.amountCents, entry.incomeSavingsCents, entry.payerUserId, payerNames.get(entry.payerUserId), request.user.id])
+      ids.push(result.insertId)
     }
-    const [result] = await connection.execute(`
-      INSERT INTO expenses (entry_type, transfer_direction, group_id, date, transaction_time, merchant, product_name, note, category, amount_cents, payer_user_id, payer, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [type, transferDirection, request.group.id, date, time, merchant.trim(), productName.trim(), note.trim(), category, amountCents, payerUserId, payers[0].display_name, request.user.id])
     const [rows] = await connection.execute(`
-      SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
-        e.entry_type, e.transfer_direction, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
-      FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id WHERE e.id = ?
-    `, [result.insertId])
+      SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time,
+        e.merchant, e.product_name, e.note, e.category, e.entry_type, e.transfer_direction, e.amount_cents, e.income_savings_cents,
+        e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
+      FROM expenses e LEFT JOIN accounts a ON a.id=e.payer_user_id WHERE e.group_id=? AND e.id IN (${ids.map(() => '?').join(',')})
+    `, [request.group.id, ...ids])
+    const saved = new Map(rows.map((row) => [row.id, serializeExpense(row)]))
     await connection.commit()
-    response.status(201).json({ expense: serializeExpense(rows[0]) })
+    const expenses = ids.map((id) => saved.get(id))
+    response.status(201).json(batch ? { expenses } : { expense: expenses[0] })
   } catch (error) {
     await connection.rollback()
     throw error
-  } finally {
-    connection.release()
-  }
+  } finally { connection.release() }
 })
 
 app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember, async (request, response) => {
@@ -773,10 +777,11 @@ app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember,
     await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
     const [[member]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
     if (!member) throw new GroupError(403, '你已离开该群组。')
-    const [[record]] = await connection.execute('SELECT entry_type,transfer_direction,amount_cents FROM expenses WHERE id=? AND group_id=?', [id,request.group.id])
-    if (record?.entry_type === 'transfer' && record.transfer_direction === 'to_savings') {
+    const [[record]] = await connection.execute('SELECT entry_type,transfer_direction,amount_cents,income_savings_cents FROM expenses WHERE id=? AND group_id=?', [id,request.group.id])
+    const savingsCredit = record?.entry_type === 'income' ? Number(record.income_savings_cents) : record?.entry_type === 'transfer' && record.transfer_direction === 'to_savings' ? Number(record.amount_cents) : 0
+    if (savingsCredit > 0) {
       const balances = await getAccountBalances(connection,request.group.id)
-      if (balances.savingsCents < Number(record.amount_cents)) throw new GroupError(409, '删除这笔存入会导致存款余额不足，请先处理相关取出记录。')
+      if (balances.savingsCents < savingsCredit) throw new GroupError(409, '删除这笔账单会导致存款余额不足，请先处理相关取出记录。')
     }
     const [result] = await connection.execute('DELETE FROM expenses WHERE id = ? AND group_id = ?', [id, request.group.id])
     if (!result.affectedRows) throw new GroupError(404, '账单不存在。')

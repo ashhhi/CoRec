@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS expenses (
   note VARCHAR(250) NOT NULL DEFAULT '',
   category VARCHAR(20) NOT NULL,
   amount_cents BIGINT UNSIGNED NOT NULL,
+  income_savings_cents BIGINT UNSIGNED NOT NULL DEFAULT 0,
   payer_user_id INT UNSIGNED NULL,
   payer VARCHAR(80) NOT NULL DEFAULT '',
   created_by INT UNSIGNED NOT NULL,

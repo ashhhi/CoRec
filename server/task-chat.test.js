@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 import test from 'node:test'
 import { taskInstructions, taskTimeNow } from './task-protocol.js'
+import { savingsInstructions, transferDirections, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions } from './ledger-protocol.js'
 
 const categories=['餐饮','交通','娱乐','购物','居住','其他']
 const incomeCategories=['工资','奖金','退款','其他收入']
@@ -14,7 +15,7 @@ test('web Chat distinguishes task drafts, follow-up questions, actions and expen
   const source=await readFile(new URL('../src/ChatPage.jsx',import.meta.url),'utf8')
   let answer={intent:'task',reply:'Task draft',task}
   const requests=[]
-  const context=vm.createContext({categories,incomeCategories,taskInstructions,taskTimeNow,AbortController,
+  const context=vm.createContext({categories,incomeCategories,taskInstructions,taskTimeNow,savingsInstructions,transferDirections,validateIncomeSavings,incomeAllocationLabel,expenseValues,batchInstructions,AbortController,
     window:{setTimeout,clearTimeout},
     fetch:async(url,options)=>{
       const body=JSON.parse(options.body)
@@ -38,6 +39,16 @@ test('web Chat distinguishes task drafts, follow-up questions, actions and expen
   answer={intent:'expense',reply:'Expense draft',expense}
   result=await context.parseExpense(history,[member],member,1)
   assert.equal(result.expense.amount,35);assert.equal(result.expense.payerId,3)
+  answer={reply:'多笔账单',expenses:[{...expense,type:'income',category:'其他收入',amount:3000,savingsAmount:1000},expense]}
+  result=await context.parseExpense(history,[member],member,1)
+  assert.equal(result.expenses.length,2);assert.equal(result.expenses[0].savingsAmount,1000)
+  assert.equal(result.expense,null)
+  const imageBatchCount=requests.length
+  result=await context.parseExpense([{id:'image-batch',role:'user',content:'',image:'test-image'}],[member],member,1)
+  assert.equal(result.expenses.length,2);assert.equal(requests.length,imageBatchCount+1)
+  answer={expenses:[expense,{...expense,type:'income',category:'工资',amount:100,savingsAmount:200}]}
+  result=await context.parseExpense(history,[member],member,1)
+  assert.equal(result.expenses.length,0);assert.match(result.reply,/不能超过/)
   answer={intent:'task',task}
   const imageHistory=[{id:'image',role:'user',content:'',image:'test-image'}]
   const count=requests.length
@@ -50,7 +61,7 @@ test('web Chat distinguishes task drafts, follow-up questions, actions and expen
 test('QQ Chat routes task requests and retains accounting responses',async()=>{
   const source=await readFile(new URL('./qq-bot.js',import.meta.url),'utf8')
   let answer={intent:'task',task}
-  const context=vm.createContext({categories,incomeCategories,taskInstructions,taskTimeNow,process:{env:{TZ:'Asia/Hong_Kong'}},
+  const context=vm.createContext({categories,incomeCategories,taskInstructions,taskTimeNow,savingsInstructions,transferDirections,validateIncomeSavings,incomeAllocationLabel,expenseValues,batchInstructions,process:{env:{TZ:'Asia/Hong_Kong'}},
     corecRequest:async(binding,path,body)=>{
       assert.equal(path,'llm/chat')
       assert.ok(body.messages.reduce((size,item)=>size+item.content.length,0)<=5000)
@@ -72,4 +83,10 @@ test('QQ Chat routes task requests and retains accounting responses',async()=>{
   result=await context.parseMessage(binding,history,chat)
   assert.equal(result.expense.amount,35)
   assert.equal(result.expense.payerId,3)
+  answer={expenses:[{...expense,type:'income',category:'工资',amount:3000,savingsAmount:3000},expense]}
+  result=await context.parseMessage(binding,history,chat)
+  assert.equal(result.expenses.length,2);assert.equal(result.expenses[0].savingsAmount,3000)
+  answer={expenses:[expense,{...expense,savingsAmount:10}]}
+  result=await context.parseMessage(binding,history,chat)
+  assert.equal(result.expenses.length,0);assert.match(result.reply,/只有收入/)
 })

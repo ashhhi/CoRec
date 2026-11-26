@@ -1,12 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Bot, Check, ImagePlus, LockKeyhole, Send, Trash2, X } from 'lucide-react'
-import { describeDuplicate, saveExpense } from './expenseApi.js'
-import { entryLabel, entrySign, savingsInstructions, transferDirections } from '../server/ledger-protocol.js'
+import { describeDuplicate, saveExpenses } from './expenseApi.js'
+import { entryLabel, entrySign, savingsInstructions, transferDirections, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions } from '../server/ledger-protocol.js'
 import { taskInstructions, taskTimeNow } from '../server/task-protocol.js'
 import { taskApi, formatTaskTime, taskKindLabels, recurrenceLabel } from './tasksApi.js'
 
 const categories = ['餐饮', '交通', '娱乐', '购物', '居住', '其他']
 const incomeCategories = ['工资', '奖金', '退款', '其他收入']
+
+function draftExpenses(message) {
+  return message.expenses || (message.expense ? [message.expense] : [])
+}
 
 function createId() {
   return globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
@@ -51,6 +55,7 @@ function validateExpense(value, members, user) {
   return {
     type,
     transferDirection: type === 'transfer' ? value.transferDirection : null,
+    savingsAmount: validateIncomeSavings(type, amount, value.savingsAmount),
     date,
     time,
     amount,
@@ -66,8 +71,8 @@ function validateExpense(value, members, user) {
 async function parseExpense(messages, members, user, groupId) {
   const today = new Date()
   const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-  const expensePrompt = `你是 CoRec 的共同账本助手。今天是 ${todayIso}。当前群组成员：${members.map((member) => `${member.displayName} (id=${member.id})`).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。只返回一个 JSON 对象，不要 Markdown。格式：{"reply":"给用户的简短中文回复","expense":null}。用户上传图片时，默认用户希望提取图片中的账单并记账，除非用户明确提出其他用途。结合图片、文字和后续回答提取信息；若图片难以辨认，或收支类型、实际金额、日期、分类无法确定，直接向用户询问缺失信息，expense 必须为 null，不要猜测金额或日期。信息齐全后返回 expense 对象，字段为 {"type":"expense 或 income","date":"YYYY-MM-DD","time":"HH:mm 或 null","amount":数字,"category":"分类","merchant":"商家名称，可省略","productName":"商品名，可省略","note":"备注","payerName":"群组成员显示名字"}。商家名称和商品名分别填写；merchant 只能填写明确出现的实际商家名称，不能填消费描述，例如“和阿禾吃饭”或“打车”，此类描述可放在 note。不要将商家名称填入商品名；商品名不明确时留空。仅在图片或用户明确提供时间时填写 24 小时制 time，否则填 null。支出使用支出分类，收入使用收入分类；未提供商家名称时 merchant 可以省略。相对日期按今天换算。付款人或收入归属必须从群组成员中选择；未提成员时使用 ${user.displayName}。文本记账也要在信息不足时追问。不要声称账单已保存，系统会负责保存。`
-  const systemPrompt = `${expensePrompt}\n${savingsInstructions()}\n${taskInstructions(taskTimeNow())}`
+  const expensePrompt = `你是 CoRec 的共同账本助手。今天是 ${todayIso}。当前群组成员：${members.map((member) => `${member.displayName} (id=${member.id})`).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。只返回一个 JSON 对象，不要 Markdown。格式：{"reply":"给用户的简短中文回复","expenses":[]}。用户上传图片时，默认用户希望提取图片中的账单并记账，除非用户明确提出其他用途。结合图片、文字和后续回答提取信息；若图片难以辨认，或收支类型、实际金额、日期、分类无法确定，直接向用户询问缺失信息，expenses 必须为空数组，不要猜测金额或日期。信息齐全后返回 expenses 数组，每笔对象，字段为 {"type":"expense、income 或 transfer","savingsAmount":数字,"date":"YYYY-MM-DD","time":"HH:mm 或 null","amount":数字,"category":"分类","merchant":"商家名称，可省略","productName":"商品名，可省略","note":"备注","payerName":"群组成员显示名字"}。商家名称和商品名分别填写；merchant 只能填写明确出现的实际商家名称，不能填消费描述，例如“和阿禾吃饭”或“打车”，此类描述可放在 note。不要将商家名称填入商品名；商品名不明确时留空。仅在图片或用户明确提供时间时填写 24 小时制 time，否则填 null。支出使用支出分类，收入使用收入分类；未提供商家名称时 merchant 可以省略。相对日期按今天换算。付款人或收入归属必须从群组成员中选择；未提成员时使用 ${user.displayName}。文本记账也要在信息不足时追问。不要声称账单已保存，系统会负责保存。`
+  const systemPrompt = `${expensePrompt}\n${savingsInstructions()}\n${batchInstructions()}\n${taskInstructions(taskTimeNow())}`
   const recent = messages.slice(-14)
   const lastImageId = [...recent].reverse().find((message) => message.image)?.id
   const inputMessages = [{ role: 'system', content: systemPrompt }, ...recent.map(({ id, role, content, image }) => ({ role, content: content || (image ? '请提取这张图片中的账单并记账；信息不足时询问缺失信息。' : ''), ...(id === lastImageId ? { image } : {}) }))]
@@ -102,21 +107,22 @@ async function parseExpense(messages, members, user, groupId) {
   const latestMessage = messages[messages.length - 1]
   const isImageOnly = Boolean(latestMessage?.image && !latestMessage.content.trim())
   const asksForInformation = (reply) => typeof reply === 'string' && /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(reply)
-  if (isImageOnly && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && !asksForInformation(result.reply)) {
+  if (isImageOnly && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && !result.expenses?.length && !asksForInformation(result.reply)) {
     const retryMessages = inputMessages.map((message, index) => index === 0 ? {
       ...message,
-      content: `${message.content} 用户刚刚仅发送图片，即要求记账。不要只描述图片：如果图片中能确定收支类型、金额、日期及分类，必须在 expense 中填写这些字段；否则 reply 必须明确询问无法确定的字段，expense 为 null。`,
+      content: `${message.content} 用户刚刚仅发送图片，即要求记账。不要只描述图片：如果图片中能确定收支类型、金额、日期及分类，必须在 expenses 数组中填写每笔账目；否则 reply 必须明确询问无法确定的字段，expenses 为空数组。`,
     } : message)
     result = await requestModel(retryMessages)
-    if (!result.expense && !asksForInformation(result.reply)) {
+    if (!result.expense && !result.expenses?.length && !asksForInformation(result.reply)) {
       result.reply = `${typeof result.reply === 'string' ? `${result.reply}\n` : ''}请补充这笔账单的收支类型、金额、日期和分类，以便记账。`
     }
   }
   if (result.intent === 'task' || result.task || result.taskAction) return { intent: 'task', reply: result.reply || '请补充任务内容和时间。', task: result.task, taskAction: result.taskAction }
   try {
-    return { reply: typeof result.reply === 'string' ? result.reply : '我理解了。', expense: validateExpense(result.expense, members, user) }
+    const expenses = expenseValues(result).map((value) => validateExpense(value, members, user))
+    return { reply: typeof result.reply === 'string' ? result.reply : '我理解了。', expenses, expense: expenses.length === 1 ? expenses[0] : null }
   } catch (validationError) {
-    return { reply: validationError.message, expense: null }
+    return { reply: validationError.message, expense: null, expenses: [] }
   }
 }
 
@@ -196,32 +202,26 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
         return
       }
       const lastImageIndex = nextMessages.findLastIndex((message) => message.role === 'user' && message.image)
-      const lastSavedIndex = nextMessages.findLastIndex((message) => message.expense?.saved || message.expense?.dismissed)
-      if (result.expense && lastImageIndex > lastSavedIndex) {
+      const lastSavedIndex = nextMessages.findLastIndex((message) => ['saved', 'dismissed'].includes(message.expenseStatus) || message.expense?.saved || message.expense?.dismissed)
+      const draft = { id: createId(), role: 'assistant', content: result.reply, expenses: result.expenses || [], expenseStatus: 'draft' }
+      if (draft.expenses.length && lastImageIndex > lastSavedIndex) {
+        let data
         try {
-          const data = await saveExpense(groupId, result.expense)
+          data = await saveExpenses(groupId, draft.expenses)
           if (data.duplicates) {
-            setMessages((current) => [...current, { id: createId(), role: 'assistant', content: '发现可能重复的账单，请确认是否继续入账。', expense: { ...result.expense, saved: false, duplicates: data.duplicates } }])
+            setMessages((current) => [...current, { ...draft, content: '发现可能重复的账单，这批尚未保存，请确认是否全部入账。', duplicates: data.duplicates }])
             return
           }
         } catch (saveError) {
-          setMessages((current) => [...current, { id: createId(), role: 'assistant', content: result.reply, expense: { ...result.expense, saved: false } }])
+          setMessages((current) => [...current, draft])
           setError(saveError.message || '保存账单失败，请确认后重试。')
           return
         }
-        const typeLabel = entryLabel(result.expense)
-        setMessages((current) => [...current, {
-          id: createId(), role: 'assistant', content: `已把这笔${typeLabel}记入 ${groupName}。`, expense: { ...result.expense, saved: true },
-        }])
+        setMessages((current) => [...current, { ...draft, content: `已将 ${data.expenses.length} 笔账单记入 ${groupName}。`, expenses: data.expenses, expenseStatus: 'saved' }])
         try { await onExpenseSaved() } catch { setError('账单已保存，但刷新账本失败。') }
         return
       }
-      setMessages((current) => [...current, {
-        id: createId(),
-        role: 'assistant',
-        content: result.reply,
-        expense: result.expense ? { ...result.expense, saved: false } : null,
-      }])
+      setMessages((current) => [...current, draft])
     } catch (requestError) {
       setError(requestError.name === 'AbortError'
         ? '模型响应超时，请检查配置或稍后重试。'
@@ -233,10 +233,10 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
     }
   }
 
-  function updateDraftPayer(messageId, payerId) {
+  function updateDraftPayer(messageId, index, payerId) {
     const payer = members.find((member) => member.id === Number(payerId))
-    setMessages((current) => current.map((message) => message.id === messageId && message.expense
-      ? { ...message, expense: { ...message.expense, payerId: payer?.id, payerName: payer?.displayName || '' } }
+    setMessages((current) => current.map((message) => message.id === messageId
+      ? { ...message, expenses: draftExpenses(message).map((expense, itemIndex) => itemIndex === index ? { ...expense, payerId: payer?.id, payerName: payer?.displayName || '' } : expense) }
       : message))
   }
 
@@ -249,21 +249,22 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
     } catch (error) { setError(error.message) } finally { setSavingId('') }
   }
 
-  async function confirmExpense(message) {
+  async function confirmExpenses(message) {
+    if (savingId) return
     setSavingId(message.id)
     setError('')
     try {
-      const expense = { ...message.expense, category: message.expense.type !== 'income' && message.expense.category === '居家' ? '居住' : message.expense.category, payerId: message.expense.payerId }
-      const result = await saveExpense(groupId, expense, (message.expense.duplicates || []).map((item) => item.id))
+      const expenses = draftExpenses(message).map((expense) => ({ ...expense, category: expense.type !== 'income' && expense.category === '居家' ? '居住' : expense.category }))
+      const duplicates = message.duplicates || message.expense?.duplicates || []
+      const result = await saveExpenses(groupId, expenses, duplicates.map((item) => item.id))
       if (result.duplicates) {
-        setMessages((current) => current.map((item) => item.id === message.id ? { ...item, expense: { ...item.expense, duplicates: result.duplicates } } : item))
+        setMessages((current) => current.map((item) => item.id === message.id ? { ...item, duplicates: result.duplicates } : item))
         return
       }
-      const typeLabel = entryLabel(message.expense)
-      setMessages((current) => [...current.map((item) => item.id === message.id ? { ...item, expense: { ...item.expense, saved: true } } : item), {
-        id: createId(), role: 'assistant', content: `已把这笔${typeLabel}记入 ${groupName}。`,
+      setMessages((current) => [...current.map((item) => item.id === message.id ? { ...item, expenses: result.expenses, expense: undefined, expenseStatus: 'saved' } : item), {
+        id: createId(), role: 'assistant', content: `已将 ${result.expenses.length} 笔账单记入 ${groupName}。`,
       }])
-      await onExpenseSaved()
+      try { await onExpenseSaved() } catch { setError('账单已保存，但刷新账本失败。') }
     } catch (saveError) {
       setError(saveError.message || '保存账单失败。')
     } finally {
@@ -280,8 +281,6 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
     <div className="chat-thread">
       {!messages.length && <div className="chat-welcome"><div className="chat-welcome-icon"><Bot size={23} /></div><h2>记账、任务，都可以告诉我</h2><p>发送账单，或告诉我什么时候提醒你、定时生成什么内容。</p><div className="chat-suggestions"><button onClick={() => setInput('明天下午3点提醒我交水电费，在群里提醒')}>明天下午3点提醒交水电费</button><button onClick={() => setInput('今晚8点自动汇总本月账本收支，在群里告诉我结果')}>今晚8点汇总本月收支</button><button onClick={() => setInput('刚才我和阿禾吃饭花了 168 元，记到餐饮里')}>晚餐 168 元，记到餐饮</button><button onClick={() => setInput('昨天我付了 36 元打车费，帮我记一笔')}>昨天打车 36 元</button><button onClick={() => setInput('我今天收到工资 8000 元，记一笔收入')}>收到工资 8000 元</button></div></div>}
       {messages.map((message) => {
-        const isIncome = message.expense?.type === 'income'
-        const isTransfer = message.expense?.type === 'transfer'
         return <article className={`chat-message ${message.role}`} key={message.id}>
           <div className="message-avatar">{message.role === 'assistant' ? <Bot size={17} /> : user.displayName.slice(0, 1)}</div>
           <div className="message-content">
@@ -298,14 +297,10 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
               {!message.task.saved && !message.task.dismissed && <div className="draft-actions"><button type="button" className="confirm-draft" disabled={savingId === message.id} onClick={() => confirmTask(message)}><Check size={14} />{savingId === message.id ? '正在创建…' : '确认创建任务'}</button><button type="button" onClick={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, task: { ...item.task, dismissed: true } } : item))}>取消</button></div>}
               {message.task.dismissed && <p>已取消草稿</p>}
             </div>}
-            {message.expense && <div className={message.expense.saved ? 'expense-draft saved' : 'expense-draft'}>
-              <div className="draft-heading"><strong>{message.expense.saved ? `已记入${isTransfer ? '存款转账' : isIncome ? '收入' : '支出'}` : message.expense.dismissed ? '已取消入账' : message.expense.duplicates ? '可能重复' : `待确认${isTransfer ? '存款转账' : isIncome ? '收入' : '支出'}`}</strong><span className={isTransfer ? 'savings-draft-category' : undefined}>{isTransfer && <LockKeyhole size={12} />}{message.expense.category}</span></div>
-              <div className="draft-main"><strong>{isTransfer ? entryLabel(message.expense) : message.expense.productName || message.expense.merchant || message.expense.category}</strong><b className={isTransfer ? 'savings-amount' : isIncome ? 'income-amount' : ''}>{entrySign(message.expense)} ¥{Number(message.expense.amount).toFixed(2)}</b></div>
-              {message.expense.merchant && message.expense.merchant !== message.expense.category && <div className="draft-meta"><span>商家：{message.expense.merchant}</span></div>}
-              <div className="draft-meta"><span>{message.expense.date}{message.expense.time ? ` ${message.expense.time}` : ''}</span><span>{message.expense.note || '无备注'}</span></div>
-              {!message.expense.saved && !message.expense.dismissed && message.expense.duplicates && <div className="duplicate-list"><strong>已有相似账单</strong>{message.expense.duplicates.map((item) => <div key={item.id}>{describeDuplicate(item)}</div>)}</div>}
-              {!message.expense.saved && !message.expense.dismissed && <div className="draft-actions"><label><span>{isTransfer ? '经办成员' : isIncome ? '收入归属' : '付款人'}</span><select value={message.expense.payerId} onChange={(event) => updateDraftPayer(message.id, event.target.value)}>{members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select></label>{message.expense.duplicates && <button type="button" className="duplicate-cancel" onClick={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, expense: { ...item.expense, dismissed: true } } : item))} disabled={savingId === message.id}>取消</button>}<button className="primary-button" onClick={() => confirmExpense(message)} disabled={savingId === message.id}><Check size={16} />{savingId === message.id ? '保存中…' : message.expense.duplicates ? '仍然入账' : `确认${isTransfer ? '转账' : isIncome ? '收入' : '记账'}`}</button></div>}
-            </div>}
+            {draftExpenses(message).length > 0 && <ExpenseDrafts message={message} members={members} saving={Boolean(savingId)}
+              onPayerChange={(index, payerId) => updateDraftPayer(message.id, index, payerId)}
+              onConfirm={() => confirmExpenses(message)}
+              onDismiss={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, expenseStatus: 'dismissed' } : item))} />}
           </div>
         </article>
       })}
@@ -321,4 +316,30 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
       </form><p className="chat-disclaimer">图片账单信息完整时自动入账，发现可能重复时需要确认。</p></div>
 
   </section>
+}
+
+
+function ExpenseDrafts({ message, members, saving, onPayerChange, onConfirm, onDismiss }) {
+  const expenses = draftExpenses(message)
+  const saved = message.expenseStatus === 'saved' || message.expense?.saved
+  const dismissed = message.expenseStatus === 'dismissed' || message.expense?.dismissed
+  const duplicates = message.duplicates || message.expense?.duplicates || []
+  const editable = !saved && !dismissed
+  return <div className={saved ? 'expense-draft saved' : 'expense-draft'}>
+    <div className="draft-heading"><strong>{saved ? '已记入账本' : dismissed ? '已取消入账' : duplicates.length ? '可能重复 · 整批尚未保存' : '待确认账单'}</strong><span>共 {expenses.length} 笔</span></div>
+    {expenses.map((expense, index) => {
+      const isIncome = expense.type === 'income'
+      const isTransfer = expense.type === 'transfer'
+      return <div className="batch-expense-item" key={index}>
+        <div className="draft-heading"><strong>{index + 1}. {entryLabel(expense)}</strong><span className={isTransfer ? 'savings-draft-category' : undefined}>{isTransfer && <LockKeyhole size={12} />}{expense.category}</span></div>
+        <div className="draft-main"><strong>{isTransfer ? entryLabel(expense) : expense.productName || expense.merchant || expense.category}</strong><b className={isTransfer ? 'savings-amount' : isIncome ? 'income-amount' : ''}>{entrySign(expense)} ¥{Number(expense.amount).toFixed(2)}</b></div>
+        {isIncome && <p className="income-allocation">{Number(expense.savingsAmount) > 0 && <LockKeyhole size={12} />}{incomeAllocationLabel(expense)}</p>}
+        {expense.merchant && expense.merchant !== expense.category && <div className="draft-meta"><span>商家：{expense.merchant}</span></div>}
+        <div className="draft-meta"><span>{expense.date}{expense.time ? ` ${expense.time}` : ''}</span><span>{expense.note || '无备注'}</span></div>
+        {editable ? <div className="draft-actions"><label><span>{isTransfer ? '经办成员' : isIncome ? '收入归属' : '付款人'}</span><select value={expense.payerId} disabled={saving} onChange={(event) => onPayerChange(index, event.target.value)}>{members.map((member) => <option key={member.id} value={member.id}>{member.displayName}</option>)}</select></label></div> : <div className="draft-meta"><span>{expense.payer || expense.payerName || members.find((member) => member.id === expense.payerId)?.displayName}</span></div>}
+      </div>
+    })}
+    {editable && duplicates.length > 0 && <div className="duplicate-list"><strong>已有相似账单</strong>{duplicates.map((item) => <div key={item.id}>{describeDuplicate(item)}</div>)}</div>}
+    {editable && <div className="draft-actions"><button type="button" className="duplicate-cancel" disabled={saving} onClick={onDismiss}>取消</button><button type="button" className="primary-button" disabled={saving || !members.length} onClick={onConfirm}><Check size={16} />{saving ? '保存中…' : duplicates.length ? '仍然全部入账' : `确认入账${expenses.length > 1 ? `（${expenses.length} 笔）` : ''}`}</button></div>}
+  </div>
 }
