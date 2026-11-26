@@ -249,16 +249,6 @@ function findImage(attachments) {
   ))
 }
 
-function looksLikeLedgerDetails(text) {
-  const date = /^(?:今天|昨天|前天|大前天|(?:上|这|本)?(?:周|星期)[一二三四五六日天]|(?:\d{4}[-/.])?\d{1,2}[-/.]\d{1,2}|(?:\d{4}年)?\d{1,2}月\d{1,2}[日号]?|\d{1,2}[日号])$/
-  const time = /^(?:凌晨|早上|上午|中午|下午|晚上|\d{1,2}:\d{2})$/
-  const amount = /^\d+(?:\.\d{1,2})?$/
-  const parts = text.replace(/[。！!]+$/, '').split(/[\s,、;]+/).filter(Boolean)
-  return parts.length > 0 && parts.length <= 4 && parts.every((part) => (
-    date.test(part) || time.test(part) || amount.test(part) || categories.includes(part) || incomeCategories.includes(part)
-  ))
-}
-
 function classifyMessage(event, eventType) {
   let text = typeof event.content === 'string' ? event.content.trim().slice(0, 3000) : ''
   if (eventType === 'C2C_MESSAGE_CREATE') return { text, mode: 'direct' }
@@ -280,15 +270,14 @@ function classifyMessage(event, eventType) {
   const hasMoney = /钱|金额|付款|支付|实付|收款|到账|退款|报销|支出|收入|花了|花费|单价|总价|人民币|¥\s*\d|[\d零一二两三四五六七八九十百千万]\s*(?:元|块)/.test(normalized)
   const hasQuantity = /数量|件数|份数|[\d几零一二两三四五六七八九十百千万]\s*(?:个|件|份|杯|瓶|盒|包|袋|箱|斤|公斤|克|升|张|套|单)/.test(normalized)
   if (hasMoney || hasQuantity || findImage(event.attachments)) return { text, mode: 'automatic' }
-  if (looksLikeLedgerDetails(normalized)) return { text, mode: 'details' }
-  return null
+  return text ? { text, mode: 'continuation' } : null
 }
 
 async function handleMessage(chat, event, message) {
   const { openid, groupOpenid } = chat
   const { text, mode } = message
-  const details = mode === 'details'
-  const automatic = mode === 'automatic' || details
+  const continuation = mode === 'continuation'
+  const automatic = mode === 'automatic' || continuation
   let binding
   if (groupOpenid) {
     if (mode === 'direct' && text === '绑定') {
@@ -314,15 +303,18 @@ async function handleMessage(chat, event, message) {
     if (!binding) return '请先在 CoRec 群组面板生成绑定码，然后发送：绑定 绑定码'
   }
 
-  const state = await getState(chat, binding, details)
+  const state = await getState(chat, binding, continuation)
   const saveState = (value) => setState(chat, binding, value)
   const pending = state.pending
-  if (automatic && pending) return
-  if (details && state.messages.at(-1)?.role !== 'assistant') return
-
   const confirmsEntry = /^(确认|仍然入账)$/.test(text) || (groupOpenid && text === '确认入账')
   const cancelsEntry = /^(取消|取消入账)$/.test(text)
   const resetsEntry = text === '重新开始' || (groupOpenid && text === '重新记账')
+  if (mode === 'automatic' && pending) return
+  if (continuation) {
+    if (pending) {
+      if (!confirmsEntry && !cancelsEntry && !resetsEntry) return
+    } else if (state.messages.at(-1)?.role !== 'assistant') return
+  }
   const savedReply = (expense) => groupOpenid ? '已记入账本。' : `已记入 ${binding.group_name}：\n${summary(expense)}`
   const duplicateReply = (title, duplicates) => {
     if (groupOpenid) return `${title}\n发送「确认入账」或「取消入账」。如果群里只接收 @ 消息，请先 @机器人。`
@@ -362,7 +354,7 @@ async function handleMessage(chat, event, message) {
   if (!result.expense) {
     if (automatic && !result.reply) return
     let answer = /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply) ? result.reply : `${result.reply}\n请补充账单的收支类型、金额、日期和分类。`
-    if (groupOpenid) answer += '\n可以直接补充日期、金额或分类，也可以用「记账」加补充内容继续。'
+    if (groupOpenid) answer += '\n群内已开启全部消息接收时，10 分钟内直接回复即可继续；否则请 @机器人 回复。'
     await saveState({ messages: [...messages, { role: 'assistant', content: answer }].slice(-10) })
     return answer
   }
@@ -388,7 +380,7 @@ async function processEvent(chat, event, message) {
   let output
   try { output = await handleMessage(chat, event, message) } catch (error) {
     console.error('QQ message processing failed:', error.message)
-    if (message.mode === 'automatic' || message.mode === 'details') return
+    if (message.mode === 'automatic' || message.mode === 'continuation') return
     output = chat.groupOpenid ? '处理失败，请稍后重试。' : `处理失败：${error.message || '请稍后重试。'}`
   }
   if (output) await reply(chat, messageId, output)
