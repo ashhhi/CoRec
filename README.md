@@ -12,6 +12,8 @@ Open `http://localhost:8080` (or the port set by `APP_PORT`), register an accoun
 
 Set `COOKIE_SECURE=true` when serving the app over HTTPS. Leave it `false` for local HTTP development.
 
+For HTTPS on Ubuntu with a fixed public IP and no domain, follow [the IP certificate deployment guide](deploy/HTTPS.md). It includes a separate Compose configuration, HTTP-to-HTTPS redirects, and automatic certificate renewal with Nginx reloads.
+
 ## Group membership and permissions
 
 The group panel lists every member's role and QQ private/group binding status. Owners and administrators can copy the invite code, invite an existing CoRec account by username, approve or reject applications, and withdraw invitations. A direct invitation requires the recipient to accept it; an invite code only submits an application. Applicants can view or withdraw their applications, and recipients can accept or decline invitations in the same panel. These lists refresh while the panel is open; approval updates the applicant's available groups automatically.
