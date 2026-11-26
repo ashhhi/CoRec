@@ -10,6 +10,7 @@ import { claimGroupBinding, ensureQqGroupSchema, getGroupBinding, getGroupBindin
 import { ensureGroupSchema, GroupError, managesGroup, registerGroupRoutes } from './groups.js'
 import { ensureTaskSchema, registerTaskRoutes, startTaskWorker } from './tasks.js'
 import { sendTaskNotification } from './qq-api.js'
+import { getAccountBalances } from './ledger.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -62,6 +63,7 @@ function serializeExpense(row) {
   return {
     id: row.id,
     type: row.entry_type || 'expense',
+    transferDirection: row.transfer_direction || null,
     date: row.date,
     time: row.transaction_time || null,
     merchant: row.merchant,
@@ -264,7 +266,8 @@ async function ensureSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS expenses (
       id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-      entry_type ENUM('expense', 'income') NOT NULL DEFAULT 'expense',
+      entry_type ENUM('expense', 'income', 'transfer') NOT NULL DEFAULT 'expense',
+      transfer_direction ENUM('to_savings','from_savings') NULL,
       group_id INT UNSIGNED NOT NULL,
       date DATE NOT NULL,
       transaction_time TIME NULL,
@@ -289,6 +292,8 @@ async function ensureSchema() {
   const [columns] = await pool.query('SHOW COLUMNS FROM expenses')
   const names = new Set(columns.map((column) => column.Field))
   if (!names.has('entry_type')) await pool.query("ALTER TABLE expenses ADD COLUMN entry_type ENUM('expense', 'income') NOT NULL DEFAULT 'expense' AFTER id")
+  if (!columns.find((column)=>column.Field === 'entry_type')?.Type.includes("'transfer'")) await pool.query("ALTER TABLE expenses MODIFY entry_type ENUM('expense','income','transfer') NOT NULL DEFAULT 'expense'")
+  if (!names.has('transfer_direction')) await pool.query("ALTER TABLE expenses ADD COLUMN transfer_direction ENUM('to_savings','from_savings') NULL AFTER entry_type")
   if (!names.has('product_name')) await pool.query("ALTER TABLE expenses ADD COLUMN product_name VARCHAR(100) NOT NULL DEFAULT '' AFTER merchant")
   if (!names.has('transaction_time')) await pool.query('ALTER TABLE expenses ADD COLUMN transaction_time TIME NULL AFTER date')
   if (!names.has('group_id')) await pool.query('ALTER TABLE expenses ADD COLUMN group_id INT UNSIGNED NULL AFTER id')
@@ -632,7 +637,7 @@ app.get('/api/groups/:groupId/analytics', requireAuth, requireGroupMember, async
   const [timelineRows] = await pool.execute(`
     SELECT ${bucketSql} AS date, e.entry_type, SUM(e.amount_cents) AS amount_cents
     FROM expenses e
-    WHERE e.group_id = ? AND e.date >= ? AND e.date <= ?
+    WHERE e.group_id = ? AND e.entry_type IN ('expense','income') AND e.date >= ? AND e.date <= ?
     GROUP BY date, e.entry_type
     ORDER BY date
   `, [request.group.id, from, to])
@@ -658,25 +663,18 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
   }
   const [rows] = await pool.execute(`
     SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
-      e.entry_type, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
+      e.entry_type, e.transfer_direction, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
     FROM expenses e
     LEFT JOIN accounts a ON a.id = e.payer_user_id
     WHERE ${conditions.join(' AND ')}
     ORDER BY e.date DESC, e.transaction_time DESC, e.id DESC
   `, parameters)
-  const [balanceRows] = await pool.execute(`
-    SELECT COALESCE(SUM(CASE
-      WHEN entry_type = 'income' THEN amount_cents
-      ELSE -CAST(amount_cents AS SIGNED)
-    END), 0) AS balance_cents
-    FROM expenses
-    WHERE group_id = ?
-  `, [request.group.id])
-  response.json({ expenses: rows.map(serializeExpense), balance: Number(balanceRows[0].balance_cents) / 100 })
+  const balances = await getAccountBalances(pool, request.group.id)
+  response.json({ expenses: rows.map(serializeExpense), balance: balances.activityCents / 100, savingsBalance: balances.savingsCents / 100 })
 })
 
 app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async (request, response) => {
-  const { date, time = null, merchant, productName = '', note = '', category, amount, payerId, type = 'expense', confirmedDuplicateIds = [] } = request.body || {}
+  const { date, time = null, merchant, productName = '', note = '', category, amount, payerId, type = 'expense', transferDirection = null, confirmedDuplicateIds = [] } = request.body || {}
   const parsedAmount = Number(amount)
   const parsedDate = typeof date === 'string' && datePattern.test(date) ? new Date(`${date}T00:00:00Z`) : null
   const validDate = parsedDate && !Number.isNaN(parsedDate.valueOf()) && parsedDate.toISOString().slice(0, 10) === date
@@ -694,10 +692,11 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || parsedAmount > 100000000) {
     return response.status(400).json({ error: '请输入有效金额。' })
   }
-  const allowedCategories = type === 'income' ? incomeCategories : categories
-  if (!['expense', 'income'].includes(type) || !allowedCategories.has(category) || !Number.isSafeInteger(payerUserId) || payerUserId < 1) {
+  const allowedCategories = type === 'transfer' ? new Set(['存款']) : type === 'income' ? incomeCategories : categories
+  if (!['expense', 'income', 'transfer'].includes(type) || !allowedCategories.has(category) || !Number.isSafeInteger(payerUserId) || payerUserId < 1) {
     return response.status(400).json({ error: '账目类型、分类或成员无效。' })
   }
+  if (type === 'transfer' ? !['to_savings','from_savings'].includes(transferDirection) : transferDirection !== null) return response.status(400).json({ error: '账户转账方向无效。' })
   if (typeof note !== 'string' || note.length > 250) {
     return response.status(400).json({ error: '备注不能超过 250 个字符。' })
   }
@@ -730,25 +729,29 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
       await connection.rollback()
       return response.status(403).json({ error: 'QQ 群绑定已失效。' })
     }
+    if (type === 'transfer' && transferDirection === 'from_savings') {
+      const balances = await getAccountBalances(connection, request.group.id)
+      if (balances.savingsCents < amountCents) throw new GroupError(400, '存款余额不足，请先记录存入存款的金额。')
+    }
     const [duplicates] = await connection.execute(`
       SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time,
-        e.merchant, e.product_name, e.note, e.category, e.entry_type, e.amount_cents, e.payer_user_id,
+        e.merchant, e.product_name, e.note, e.category, e.entry_type, e.transfer_direction, e.amount_cents, e.payer_user_id,
         COALESCE(a.display_name, e.payer) AS payer_name
       FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id
-      WHERE e.group_id = ? AND e.date = ? AND e.entry_type = ? AND e.amount_cents = ?
+      WHERE e.group_id = ? AND e.date = ? AND e.entry_type = ? AND e.amount_cents = ? AND e.transfer_direction <=> ?
       ORDER BY e.id DESC
-    `, [request.group.id, date, type, amountCents])
+    `, [request.group.id, date, type, amountCents, transferDirection])
     if (duplicates.some((row) => !confirmedDuplicateIds.includes(row.id))) {
       await connection.rollback()
       return response.status(409).json({ code: 'POSSIBLE_DUPLICATE', error: '发现可能重复的账单，请确认是否继续。', duplicates: duplicates.map(serializeExpense) })
     }
     const [result] = await connection.execute(`
-      INSERT INTO expenses (entry_type, group_id, date, transaction_time, merchant, product_name, note, category, amount_cents, payer_user_id, payer, created_by)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [type, request.group.id, date, time, merchant.trim(), productName.trim(), note.trim(), category, amountCents, payerUserId, payers[0].display_name, request.user.id])
+      INSERT INTO expenses (entry_type, transfer_direction, group_id, date, transaction_time, merchant, product_name, note, category, amount_cents, payer_user_id, payer, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [type, transferDirection, request.group.id, date, time, merchant.trim(), productName.trim(), note.trim(), category, amountCents, payerUserId, payers[0].display_name, request.user.id])
     const [rows] = await connection.execute(`
       SELECT e.id, DATE_FORMAT(e.date, '%Y-%m-%d') AS date, TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.merchant, e.product_name, e.note, e.category,
-        e.entry_type, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
+        e.entry_type, e.transfer_direction, e.amount_cents, e.payer_user_id, COALESCE(a.display_name, e.payer) AS payer_name
       FROM expenses e LEFT JOIN accounts a ON a.id = e.payer_user_id WHERE e.id = ?
     `, [result.insertId])
     await connection.commit()
@@ -770,6 +773,11 @@ app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember,
     await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
     const [[member]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
     if (!member) throw new GroupError(403, '你已离开该群组。')
+    const [[record]] = await connection.execute('SELECT entry_type,transfer_direction,amount_cents FROM expenses WHERE id=? AND group_id=?', [id,request.group.id])
+    if (record?.entry_type === 'transfer' && record.transfer_direction === 'to_savings') {
+      const balances = await getAccountBalances(connection,request.group.id)
+      if (balances.savingsCents < Number(record.amount_cents)) throw new GroupError(409, '删除这笔存入会导致存款余额不足，请先处理相关取出记录。')
+    }
     const [result] = await connection.execute('DELETE FROM expenses WHERE id = ? AND group_id = ?', [id, request.group.id])
     if (!result.affectedRows) throw new GroupError(404, '账单不存在。')
     await connection.commit()

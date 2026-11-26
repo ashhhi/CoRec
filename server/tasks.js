@@ -216,7 +216,7 @@ export async function processDueTask(pool, { generate }) {
       ])
     } else if (task.kind === 'ledger_summary') {
       const [rows] = await pool.execute(`SELECT entry_type,category,COUNT(*) AS count,SUM(amount_cents) AS cents FROM expenses
-        WHERE group_id=? AND date BETWEEN DATE_FORMAT(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00'),'%Y-%m-01')
+        WHERE group_id=? AND entry_type IN ('income','expense') AND date BETWEEN DATE_FORMAT(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00'),'%Y-%m-01')
         AND DATE(CONVERT_TZ(UTC_TIMESTAMP(),'+00:00','+08:00')) GROUP BY entry_type,category ORDER BY entry_type,category`, [task.group_id])
       const lines = rows.map((row) => `${row.entry_type === 'income' ? '收入' : '支出'} · ${row.category}：¥${(Number(row.cents)/100).toFixed(2)}（${row.count}笔）`)
       result = `本月截至当前的账本收支汇总：\n${lines.join('\n') || '暂无账单。'}`

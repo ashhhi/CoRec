@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS expenses (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  entry_type ENUM('expense', 'income') NOT NULL DEFAULT 'expense',
+  entry_type ENUM('expense', 'income', 'transfer') NOT NULL DEFAULT 'expense',
+  transfer_direction ENUM('to_savings','from_savings') NULL,
   group_id INT UNSIGNED NOT NULL,
   date DATE NOT NULL,
   transaction_time TIME NULL,

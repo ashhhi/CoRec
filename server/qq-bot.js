@@ -5,6 +5,7 @@ import mysql from 'mysql2/promise'
 import { qqToken, qqRequest } from './qq-api.js'
 import { taskInstructions, taskTimeNow } from './task-protocol.js'
 import { recurrenceLabel } from './task-recurrence.js'
+import { entryLabel, transferDirections, savingsInstructions } from './ledger-protocol.js'
 import { confirmGroupBinding, getGroupBinding, qqOpenidPattern, requestGroupBinding } from './qq-group.js'
 
 const appId = process.env.QQ_BOT_APP_ID?.trim()
@@ -164,19 +165,20 @@ function extractJson(content) {
 
 function validateExpense(value, binding, members) {
   if (!value || typeof value !== 'object') return null
-  if (!['expense', 'income'].includes(value.type)) throw new Error('请问这笔账单是收入还是支出？')
+  if (!['expense', 'income', 'transfer'].includes(value.type)) throw new Error('请问这笔账单是收入、支出还是存款转账？')
   const amount = Number(value.amount)
   const date = typeof value.date === 'string' ? value.date : ''
   const parsed = new Date(`${date}T00:00:00Z`)
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== date) throw new Error('请提供账单日期。')
   if (!Number.isFinite(amount) || amount < 0.01 || amount > 100000000) throw new Error('请提供有效金额。')
-  if (!(value.type === 'income' ? incomeCategories : categories).includes(value.category)) throw new Error('请提供账单分类。')
+  if (value.type === 'transfer' && !Object.hasOwn(transferDirections,value.transferDirection)) throw new Error('请说明是活动账户转入存款，还是存款转回活动账户。')
+  if (!(value.type === 'transfer' ? ['存款'] : value.type === 'income' ? incomeCategories : categories).includes(value.category)) throw new Error('请提供账单分类。')
   const payerId = members
     ? (members.find((member) => member.displayName === value.payerName) || members.find((member) => member.id === binding.user_id))?.id
     : binding.user_id
   if (!payerId) throw new Error('无法找到群组成员，请检查账号绑定。')
   const time = typeof value.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time) ? value.time : null
-  return { type: value.type, amount, date, time, category: value.category, payerId,
+  return { type: value.type, transferDirection: value.type === 'transfer' ? value.transferDirection : null, amount, date, time, category: value.category, payerId,
     merchant: typeof value.merchant === 'string' && value.merchant.trim() ? value.merchant.trim().slice(0, 100) : value.category,
     productName: typeof value.productName === 'string' ? value.productName.trim().slice(0, 100) : '',
     note: typeof value.note === 'string' ? value.note.trim().slice(0, 250) : '' }
@@ -191,7 +193,7 @@ async function parseMessage(binding, messages, chat, automatic = false) {
   const purpose = automatic
     ? '这是一条发在群里的普通消息。只有最新消息描述实际发生的收支、明确请求任务/提醒，或补充前文信息，才提取或追问。闲聊、报价、计划购买、无关图片或单独的数量返回 {"reply":"","expense":null}。不要把商品数量当成金额。'
     : '用户可能要求记账或任务提醒。按最新意图处理；图片默认记账。'
-  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。${taskInstructions(taskTimeNow())}`
+  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expense":null}。明确收支类型、实际金额、日期、分类后，expense 为 {"type":"expense或income","amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expense 为 null；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。${savingsInstructions()}${taskInstructions(taskTimeNow())}`
   const recent = messages.slice(-8)
   const history = recent.map((message, index) => ({ ...message, content: message.content.slice(0, index === recent.length - 1 ? 3000 : 100) }))
   const lastImage = history.findLastIndex((message) => message.image)
@@ -218,7 +220,7 @@ async function parseMessage(binding, messages, chat, automatic = false) {
 }
 
 function summary(expense) {
-  return `${expense.date}${expense.time ? ` ${expense.time}` : ''} · ${expense.type === 'income' ? '收入' : '支出'} · ${expense.category} · ¥${Number(expense.amount).toFixed(2)}${expense.productName ? ` · ${expense.productName}` : ''}${expense.merchant && expense.merchant !== expense.category ? ` · ${expense.merchant}` : ''}`
+  return `${expense.date}${expense.time ? ` ${expense.time}` : ''} · ${entryLabel(expense)} · ${expense.category} · ¥${Number(expense.amount).toFixed(2)}${expense.productName ? ` · ${expense.productName}` : ''}${expense.merchant && expense.merchant !== expense.category ? ` · ${expense.merchant}` : ''}`
 }
 
 function findImage(attachments) {
@@ -247,7 +249,7 @@ function classifyMessage(event, eventType) {
   if (/^(确认入账|取消入账|重新记账)$/.test(text)) return { text, mode: 'follow-up' }
 
   const normalized = text.normalize('NFKC')
-  const hasMoney = /钱|金额|付款|支付|实付|收款|到账|退款|报销|支出|收入|花了|花费|单价|总价|人民币|¥\s*\d|[\d零一二两三四五六七八九十百千万]\s*(?:元|块)/.test(normalized)
+  const hasMoney = /钱|金额|付款|支付|实付|收款|到账|退款|报销|支出|收入|花了|花费|单价|总价|存款|存钱|存入|取出|取钱|转入|转出|转账|人民币|¥\s*\d|[\d零一二两三四五六七八九十百千万]\s*(?:元|块)/.test(normalized)
   const hasQuantity = /数量|件数|份数|[\d几零一二两三四五六七八九十百千万]\s*(?:个|件|份|杯|瓶|盒|包|袋|箱|斤|公斤|克|升|张|套|单)/.test(normalized)
   if (hasMoney || hasQuantity || findImage(event.attachments)) return { text, mode: 'automatic' }
   return text ? { text, mode: 'continuation' } : null

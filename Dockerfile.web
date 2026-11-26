@@ -5,7 +5,8 @@ COPY package*.json ./
 RUN npm ci
 COPY index.html vite.config.js ./
 COPY src ./src
-COPY server/task-protocol.js server/task-recurrence.js ./server/
+COPY public ./public
+COPY server/task-protocol.js server/task-recurrence.js server/ledger-protocol.js ./server/
 RUN npm run build
 
 FROM nginx:1.27-alpine

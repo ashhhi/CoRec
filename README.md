@@ -24,6 +24,12 @@ Ordinary members and administrators can leave a group. Leaving or being removed 
 
 To run the group integration tests, use a separate MySQL 8 instance and set `COREC_TEST_MYSQL_URL` to its connection URL, then run `npm run test:groups`. The test account needs permission to create and drop databases. Each run creates a randomly named test database and removes it afterward. The tests cover approvals, invitations, role restrictions, concurrent ownership transfers, QQ cleanup, and dissolution. Without a test database connection, the suite is skipped.
 
+## Savings and account transfers
+
+The balance strip shows the active account balance and a separate gray savings balance with a lock icon. Existing income and expenses belong to the active account. **存款 / 转账** records a move from the active account to savings or from savings back to the active account, using category **存款**. Savings starts at zero and equals deposits minus withdrawals; the active balance equals all income minus expenses minus net deposits into savings. Transfers appear in the ledger and calendar's daily records, but are excluded from income/expense totals, charts, and scheduled ledger summaries.
+
+Choose the transfer direction in the new-entry form, or tell Chat/QQ `今天存入存款500元` or `今天从存款取出200元到活动账户`. These are accounting records only. A withdrawal cannot exceed the recorded savings balance; deleting a deposit is blocked if it would make savings negative. Account balances are shared by the ledger, across all months. Resetting the ledger also removes its transfers and returns both balances to zero. Existing data is preserved, and the API adds the transfer type and direction column at startup.
+
 ## Tasks and scheduled reminders
 
 The **任务** page stores shared tasks, assignees, due times, execution results, and notification status. Members can create tasks; the creator, assignee, owner, or administrator can complete, cancel, reschedule, or retry their notifications. Unscheduled reminders are simple to-do items. All task times use Hong Kong time (UTC+8).

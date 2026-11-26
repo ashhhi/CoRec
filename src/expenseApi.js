@@ -1,3 +1,4 @@
+import { entryLabel } from '../server/ledger-protocol.js'
 export async function saveExpense(groupId, expense, confirmedDuplicateIds = []) {
   const { duplicates, saved, dismissed, ...fields } = expense
   const response = await fetch(`/api/groups/${groupId}/expenses`, {
@@ -13,5 +14,5 @@ export async function saveExpense(groupId, expense, confirmedDuplicateIds = []) 
 
 export function describeDuplicate(item) {
   const name = item.productName || (item.merchant !== item.category ? item.merchant : '') || item.category
-  return [item.date, item.time, item.category, name !== item.category ? name : '', `¥${Number(item.amount).toFixed(2)}`, item.payer].filter(Boolean).join(' · ')
+  return [item.date, item.time, item.type === 'transfer' ? entryLabel(item) : item.category, name !== item.category ? name : '', `¥${Number(item.amount).toFixed(2)}`, item.payer].filter(Boolean).join(' · ')
 }

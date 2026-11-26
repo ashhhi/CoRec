@@ -52,6 +52,17 @@ button { border: 0; cursor: pointer; }
 .column-filter-footer button { min-height: 32px; padding: 0 12px; color: #697772; border: 1px solid #e6e4dd; border-radius: 5px; background: transparent; font-size: 11px; }
 .column-filter-footer .column-filter-apply { color: #fff; border-color: #dc7055; background: #dc7055; }
 .balance-summary { display: grid; grid-template-columns: 1.35fr 1fr 1fr; align-items: center; margin: 0 0 16px; padding: 14px 0; border-top: 1px solid #e8e5dd; border-bottom: 1px solid #e8e5dd; }.balance-primary, .balance-stat { display: flex; min-height: 47px; flex-direction: column; justify-content: center; gap: 4px; padding: 0 18px; border-right: 1px solid #e8e5dd; }.balance-primary { padding-left: 2px; }.balance-stat:last-child { border-right: 0; }.balance-primary > span, .balance-stat > span { color: #929b96; font-size: 10px; }.balance-primary > strong { color: #34434b; font-size: 21px; font-weight: 700; }.balance-primary > strong.negative-balance { color: #c55f4a; }.balance-primary > small { color: #a5aaa5; font-size: 9px; }.balance-stat > strong { color: #48575e; font-size: 14px; }.balance-stat > strong.income-text { color: #438969; }
+.balance-summary { grid-template-columns: minmax(0,1.2fr) minmax(0,1.2fr) minmax(0,1fr) minmax(0,1fr); }
+.balance-primary, .balance-stat { min-width: 0; }
+.balance-primary > strong, .balance-stat > strong { overflow-wrap: anywhere; }
+.balance-savings > span { display: flex; align-items: center; gap: 6px; color: #929895; }
+.balance-savings > strong { color: #969c99; font-size: 21px; }
+.balance-savings > small { color: #a5aaa5; font-size: 9px; line-height: 1.5; }
+.transaction-amount.savings, .draft-main .savings-amount, .calendar-transfer { color: #929895; }
+.entry-type-switch.ledger-entry-types { grid-template-columns: 1fr 1fr 1.3fr; }
+.ledger-entry-types button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.ledger-entry-types button.active.savings { color: #7c8580; }
+.draft-heading .savings-draft-category { display: inline-flex; align-items: center; gap: 4px; color: #929895; background: #eeefec; }
 .ledger-calendar { margin-top: 24px; }
 .calendar-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
 .calendar-heading h2 { display: flex; align-items: center; gap: 8px; margin: 0; color: #33414a; font-size: 15px; }
@@ -376,8 +387,11 @@ button { border: 0; cursor: pointer; }
   .transaction-merchant span { font-size: 8px; }
   .transaction-merchant strong { font-size: 9px; }
   .balance-summary { grid-template-columns: 1fr 1fr; row-gap: 0; }
-  .balance-primary { grid-column: 1 / -1; padding: 0 0 12px; border-right: 0; border-bottom: 1px solid #e8e5dd; }
+  .balance-primary { grid-column: auto; padding: 0 12px 12px 0; border-right: 1px solid #e8e5dd; border-bottom: 0; }
   .balance-stat { min-height: 44px; padding: 11px 8px 0 0; border-right: 0; }
+  .balance-stat.balance-savings { padding: 0 0 12px 12px; }
+  .balance-savings > strong { font-size: 19px; }
+  .balance-stat:not(.balance-savings) { border-top: 1px solid #e8e5dd; }
   .balance-stat:last-child { padding-right: 0; padding-left: 8px; }
   .analytics-toolbar { align-items: stretch; flex-direction: column; gap: 12px; }
   .analytics-controls { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; }
