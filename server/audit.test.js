@@ -58,7 +58,23 @@ test('history routes require authentication and group membership and paginate wi
   registerAuditRoutes({get:(path,...handlers)=>{routes.get=handlers},post:(path,...handlers)=>{routes.post=handlers}},{pool,requireAuth,requireGroupMember})
   for(const handlers of Object.values(routes))assert.deepEqual(handlers.slice(0,2),[requireAuth,requireGroupMember])
   const response={set(){return this},json(data){this.data=data}}
-  await routes.get.at(-1)({query:{},group:{id:7},user:{id:3}},response)
+  await routes.get.at(-1)({query:{},group:{id:7,role:'owner'},user:{id:3}},response)
   assert.equal(response.data.items.length,50)
   assert.equal(response.data.nextCursor,'51')
+})
+
+
+test('only the current owner can read history, including personal history', async () => {
+  let handler
+  let queries = 0
+  registerAuditRoutes({ get: (path, ...handlers) => { handler = handlers.at(-1) }, post() {} }, {
+    pool: { execute: async () => { queries++; throw new Error('must not query history') } },
+    requireAuth() {}, requireGroupMember() {},
+  })
+  for (const role of ['admin','member']) {
+    for (const scope of ['group','mine']) {
+      await assert.rejects(handler({ query:{scope}, group:{id:7,role}, user:{id:3} }, {}), (error) => error.status === 403)
+    }
+  }
+  assert.equal(queries, 0)
 })

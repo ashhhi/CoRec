@@ -119,6 +119,7 @@ export function auditQuery(query, groupId, userId) {
 
 export function registerAuditRoutes(app, { pool, requireAuth, requireGroupMember }) {
   app.get('/api/groups/:groupId/activity', requireAuth, requireGroupMember, async (request, response) => {
+    if (request.group.role !== 'owner') throw new GroupError(403, '只有群组创建者可以查看操作记录。')
     const { conditions, parameters, mine } = auditQuery(request.query, request.group.id, request.user.id)
     const [rows] = await pool.execute(`SELECT CAST(id AS CHAR) AS id,group_id,group_name,actor_id,actor_name,category,action,entity_id,source,outcome,details,
       DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.000Z') AS created_at FROM audit_logs

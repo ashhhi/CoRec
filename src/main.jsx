@@ -142,6 +142,11 @@ function App() {
   const activeGroup = groups.find((group) => group.id === activeGroupId) || null
   const members = groupInfo?.members || []
   const canManageRecords = ['owner', 'admin'].includes(groupInfo?.role || activeGroup?.role)
+  const canViewActivity = activeGroup?.role === 'owner' && (!groupInfo || groupInfo.id !== activeGroupId || groupInfo.role === 'owner')
+
+  useEffect(() => {
+    if (activePage === 'activity' && !canViewActivity) setActivePage('ledger')
+  }, [activePage, canViewActivity])
   const canEditTransaction = (item) => canManageRecords || item.payerId === user?.id
   const filterCategories = typeFilter === 'income'
     ? incomeCategories
@@ -382,7 +387,7 @@ function App() {
       <main className="main-content">
         <header ref={topbarRef} className="topbar">
           <div className="brand"><img className="brand-mark" src="/cat-head.svg" alt="" aria-hidden="true" /><span>CoRec</span></div>
-          <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button><button className={activePage === 'activity' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('activity')}><History size={16} />操作记录</button></nav>
+          <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button>{canViewActivity && <button className={activePage === 'activity' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('activity')}><History size={16} />操作记录</button>}</nav>
           <div className="account-actions">
             <label className="group-select-wrap"><select aria-label="切换群组" value={activeGroupId || ''} onChange={(event) => setActiveGroupId(Number(event.target.value))}>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
             <button type="button" className="icon-button" title="群组设置" aria-label="群组设置" onClick={() => setShowGroupPanel(true)}><UsersRound size={18} /></button>
@@ -393,7 +398,7 @@ function App() {
           </div>
         </header>
 
-        {activePage === 'ledger' ? <>
+        {activePage === 'ledger' || (activePage === 'activity' && !canViewActivity) ? <>
         <section className="month-toolbar">
           <div className="month-picker">
             <button className="round-button" aria-label="上个月" onClick={() => shiftMonth(-1)} disabled={allMonths}><ArrowLeft size={16} /></button>
@@ -432,7 +437,7 @@ function App() {
         </section>
         {!allMonths && <LedgerCalendar key={`${activeGroupId}:${selectedMonth}`} month={selectedMonth} transactions={transactions} today={today} loading={loading} onEdit={openTransactionForm} canEdit={canEditTransaction} />}
         <LedgerCharts groupId={activeGroupId} month={month} refreshKey={ledgerRevision} />
-        </> : activePage === 'tasks' ? <TasksPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} role={activeGroup?.role} /> : activePage === 'activity' ? <ActivityPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} /> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={async () => { setLedgerRevision((value)=>value+1); await loadLedger(month) }} />}
+        </> : activePage === 'tasks' ? <TasksPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} role={activeGroup?.role} /> : activePage === 'activity' && canViewActivity ? <ActivityPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} /> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={async () => { setLedgerRevision((value)=>value+1); await loadLedger(month) }} />}
       </main>
 
       {selectedTransaction && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTransaction(null)}><section className="expense-modal transaction-detail" role="dialog" aria-modal="true" aria-labelledby="transaction-detail-title"><div className="modal-head"><h2 id="transaction-detail-title">账单详情</h2><button type="button" className="close-button" onClick={() => setSelectedTransaction(null)} aria-label="关闭"><X size={19} /></button></div><dl>{[['类型', entryLabel(selectedTransaction)], ['金额', `¥${formatMoney(selectedTransaction.amount)}`], ['分类', selectedTransaction.category], ...(selectedTransaction.type === 'income' ? [['收入分配', incomeAllocationLabel(selectedTransaction)]] : []), ...(selectedTransaction.type === 'transfer' ? [['转账方向', entryLabel(selectedTransaction)]] : []), ['商品名', selectedTransaction.productName || '未填写'], ['商家', selectedTransaction.merchant && selectedTransaction.merchant !== selectedTransaction.category ? selectedTransaction.merchant : '未填写'], ['日期', selectedTransaction.date], ['时间', selectedTransaction.time || '未记录'], [selectedTransaction.type === 'transfer' ? '经办成员' : selectedTransaction.type === 'income' ? '收入归属' : '付款人', selectedTransaction.payer], ['备注', selectedTransaction.note || '无']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{canEditTransaction(selectedTransaction) && <button type="button" className="primary-button modal-submit" onClick={() => openTransactionForm(selectedTransaction)}><Pencil size={16} />编辑账单</button>}</section></div>}
