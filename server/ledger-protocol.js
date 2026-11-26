@@ -1,5 +1,26 @@
 export const transferDirections = { to_savings: '活动账户 → 存款账户', from_savings: '存款账户 → 活动账户' }
 
+export function ledgerTimeNow(now = new Date()) {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Hong_Kong', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)
+}
+
+export function resolveEntryTime(time, fallback = ledgerTimeNow().slice(11)) {
+  if (time == null || time === '') return fallback
+  if (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('请提供有效的账单时间。')
+  return time
+}
+
+export function resolveEntryDate(date, fallback = ledgerTimeNow().slice(0, 10)) {
+  const value = date == null || date === '' ? fallback : date
+  const parsed = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) ? new Date(`${value}T00:00:00Z`) : null
+  if (!parsed || Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== value) throw new Error('请提供有效的账单日期。')
+  return value
+}
+
+export function ledgerTimeInstructions() {
+  return '账单日期和时分分别处理：未指定日期（连今天也没说）就使用当前香港日期，date可返回null由系统补今天；未指定几点几分就time返回null，由系统补当前香港时分，完全没提日期时间即记为现在。不要因未提供日期或时分而追问。今天、昨天、星期几等按当前香港日期换算date，明确的日期和图片日期必须保留；明确给出几点几分或图片时间时保留该时间为HH:mm。过去日期未说时间也补当前时分，不能猜成00:00或午饭/晚饭的固定时刻。只给时间未给日期则用今天。此默认仅用于已发生或明确要求记账的账单，未来计划不能提前记账，任务提醒缺少执行时间仍需追问。'
+}
+
 export function entryLabel(item) {
   return item.type === 'transfer' ? transferDirections[item.transferDirection] || '账户转账' : item.type === 'income' ? '收入' : '支出'
 }
@@ -39,5 +60,5 @@ export function batchInstructions() {
 }
 
 export function savingsInstructions() {
-  return '收入支持直接入存款及拆分：income的amount是收入总额，savingsAmount是其中存入存款的金额，必须在0到amount之间，其余进入活动账户。未指定收入去向时savingsAmount为0；全部存入存款时等于amount。例如“收入3000，存入存款1000元”只返回一笔income，amount:3000,savingsAmount:1000，分类未明确时使用其他收入；“工资3000全部存入存款”返回income,amount:3000,savingsAmount:3000,category:工资。不得将同一收入的存款部分另外记为transfer，也不能把存款金额加到收入总额。expense和transfer的savingsAmount为0。独立的账户转账用type:transfer，category固定存款，transferDirection为to_savings（活动转存款）或from_savings（存款转活动）；如单独说“今天存入存款500元”是转账，不是新增收入。转账不计入收支。金额、日期、方向或收入与存款的关系不明确时追问。只记已发生或明确要求记账的款项，未来计划/提醒按任务处理。仅记账，不执行银行转账。'
+  return '收入支持直接入存款及拆分：income的amount是收入总额，savingsAmount是其中存入存款的金额，必须在0到amount之间，其余进入活动账户。未指定收入去向时savingsAmount为0；全部存入存款时等于amount。例如“收入3000，存入存款1000元”只返回一笔income，amount:3000,savingsAmount:1000，分类未明确时使用其他收入；“工资3000全部存入存款”返回income,amount:3000,savingsAmount:3000,category:工资。不得将同一收入的存款部分另外记为transfer，也不能把存款金额加到收入总额。expense和transfer的savingsAmount为0。独立的账户转账用type:transfer，category固定存款，transferDirection为to_savings（活动转存款）或from_savings（存款转活动）；如单独说“今天存入存款500元”是转账，不是新增收入。转账不计入收支。金额、方向或收入与存款的关系不明确时追问。只记已发生或明确要求记账的款项，未来计划/提醒按任务处理。仅记账，不执行银行转账。'
 }

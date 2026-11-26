@@ -1,11 +1,12 @@
+import { writeAudit } from './audit.js'
 import { createHash } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import mysql from 'mysql2/promise'
 import { qqToken, qqRequest } from './qq-api.js'
-import { taskInstructions, taskTimeNow } from './task-protocol.js'
+import { taskInstructions } from './task-protocol.js'
 import { recurrenceLabel } from './task-recurrence.js'
-import { entryLabel, transferDirections, savingsInstructions, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions } from './ledger-protocol.js'
+import { entryLabel, transferDirections, savingsInstructions, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions, ledgerTimeNow, resolveEntryTime, resolveEntryDate, ledgerTimeInstructions } from './ledger-protocol.js'
 import { confirmGroupBinding, getGroupBinding, qqOpenidPattern, requestGroupBinding } from './qq-group.js'
 
 const appId = process.env.QQ_BOT_APP_ID?.trim()
@@ -52,6 +53,7 @@ async function bind(openid, code) {
     await connection.execute('DELETE FROM qq_bindings WHERE openid = ? OR user_id = ?', [openid, userId])
     await connection.execute('INSERT INTO qq_bindings (openid, user_id, group_id) VALUES (?, ?, ?)', [openid, userId, groupId])
     await connection.execute('DELETE FROM qq_bind_codes WHERE user_id = ?', [userId])
+    await writeAudit(connection, { groupId, groupName, actorId: userId, category: 'binding', action: '绑定 QQ 私聊', source: 'qq-private' })
     await connection.commit()
     return groupName
   } catch (error) {
@@ -163,13 +165,11 @@ function extractJson(content) {
   try { return JSON.parse(content.slice(start, end + 1)) } catch { throw new Error('模型返回格式无效，请重试。') }
 }
 
-function validateExpense(value, binding, members) {
+function validateExpense(value, binding, members, defaultNow = ledgerTimeNow()) {
   if (!value || typeof value !== 'object') return null
   if (!['expense', 'income', 'transfer'].includes(value.type)) throw new Error('请问这笔账单是收入、支出还是存款转账？')
   const amount = Number(value.amount)
-  const date = typeof value.date === 'string' ? value.date : ''
-  const parsed = new Date(`${date}T00:00:00Z`)
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(parsed.valueOf()) || parsed.toISOString().slice(0, 10) !== date) throw new Error('请提供账单日期。')
+  const date = resolveEntryDate(value.date, defaultNow.slice(0, 10))
   if (!Number.isFinite(amount) || amount < 0.01 || amount > 100000000) throw new Error('请提供有效金额。')
   if (value.type === 'transfer' && !Object.hasOwn(transferDirections,value.transferDirection)) throw new Error('请说明是活动账户转入存款，还是存款转回活动账户。')
   if (!(value.type === 'transfer' ? ['存款'] : value.type === 'income' ? incomeCategories : categories).includes(value.category)) throw new Error('请提供账单分类。')
@@ -177,7 +177,7 @@ function validateExpense(value, binding, members) {
     ? (members.find((member) => member.displayName === value.payerName) || members.find((member) => member.id === binding.user_id))?.id
     : binding.user_id
   if (!payerId) throw new Error('无法找到群组成员，请检查账号绑定。')
-  const time = typeof value.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time) ? value.time : null
+  const time = resolveEntryTime(value.time, defaultNow.slice(11))
   return { type: value.type, transferDirection: value.type === 'transfer' ? value.transferDirection : null, savingsAmount: validateIncomeSavings(value.type, amount, value.savingsAmount), amount, date, time, category: value.category, payerId,
     merchant: typeof value.merchant === 'string' && value.merchant.trim() ? value.merchant.trim().slice(0, 100) : value.category,
     productName: typeof value.productName === 'string' ? value.productName.trim().slice(0, 100) : '',
@@ -189,11 +189,11 @@ async function parseMessage(binding, messages, chat, automatic = false) {
   const payerInstruction = members
     ? `群组成员：${members.map((member) => member.displayName).join('、')}。未指定付款人或收入归属时使用 ${binding.display_name}。`
     : '付款人或收入归属固定为发送者，不需要填写名字。'
-  const now = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TZ || 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const now = ledgerTimeNow()
   const purpose = automatic
     ? '这是一条发在群里的普通消息。只有最新消息描述实际发生的收支、明确请求任务/提醒，或补充前文信息，才提取或追问。闲聊、报价、计划购买、无关图片或单独的数量返回 {"reply":"","expenses":[]}。不要把商品数量当成金额。'
     : '用户可能要求记账或任务提醒。按最新意图处理；图片默认记账。'
-  const system = `你是 CoRec 账本助手。今天是 ${now}。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expenses":[]}。明确收支类型、实际金额、日期、分类后，expenses 中每笔为 {"type":"expense、income或transfer","savingsAmount":数字,"amount":数字,"date":"YYYY-MM-DD","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、日期、类型或分类时在 reply 询问缺失信息，expenses 为空数组；不要猜测金额或日期。商家只写真正的商家名，消费描述放备注。不要声称已保存。${savingsInstructions()}${batchInstructions()}${taskInstructions(taskTimeNow())}`
+  const system = `你是 CoRec 账本助手。当前香港时间 ${now}（UTC+8）。${payerInstruction}支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。${purpose}只返回 JSON：{"reply":"回复","expenses":[]}。明确收支类型、实际金额、分类后，expenses 中每笔为 {"type":"expense、income或transfer","savingsAmount":数字,"amount":数字,"date":"YYYY-MM-DD或null","time":"HH:mm或null","category":"分类","merchant":"商家名或空","productName":"商品名或空","note":"备注","payerName":"成员名"}。缺少金额、类型或分类时在 reply 询问缺失信息，expenses 为空数组；不要猜测金额，未提日期默认今天。商家只写真正的商家名，消费描述放备注。不要声称已保存。${ledgerTimeInstructions()}${savingsInstructions()}${batchInstructions()}${taskInstructions(now)}`
   const recent = messages.slice(-8)
   const history = recent.map((message, index) => ({ ...message, content: message.content.slice(0, index === recent.length - 1 ? 3000 : 100) }))
   const lastImage = history.findLastIndex((message) => message.image)
@@ -216,7 +216,7 @@ async function parseMessage(binding, messages, chat, automatic = false) {
   }
   if (result.intent === 'task' || result.task || result.taskAction) return { reply: typeof result.reply === 'string' ? result.reply.trim() : '请补充任务时间和内容。', intent: 'task', task: result.task, taskAction: result.taskAction }
   try {
-    const expenses = expenseValues(result).map((value) => validateExpense(value, binding, members))
+    const expenses = expenseValues(result).map((value) => validateExpense(value, binding, members, now))
     return { reply: typeof result.reply === 'string' ? result.reply.trim() : automatic ? '' : '请补充账单信息。', expenses, expense: expenses.length === 1 ? expenses[0] : null }
   }
   catch (error) { return { reply: error.message, expense: null, expenses: [] } }
@@ -319,6 +319,7 @@ async function handleMessage(chat, event, message) {
     return `${title}\n${details}\n回复“确认”继续，或回复“取消”。`
   }
   if (pending && (cancelsEntry || (groupOpenid && resetsEntry))) {
+    await writeAudit(pool, { groupId: binding.group_id, actorId: binding.user_id, category: 'chat', action: '取消待确认账单', source: groupOpenid ? 'qq-group' : 'qq-private' })
     await saveState({ messages: [] })
     return '已取消这批账单。'
   }
@@ -336,6 +337,7 @@ async function handleMessage(chat, event, message) {
   if (pending) return groupOpenid ? duplicateReply('有一批可能重复的账单等待处理。', []) : '有一批可能重复的账单等待处理，请回复“确认”或“取消”。'
   if (resetsEntry || text === '取消' || (groupOpenid && text === '取消入账')) {
     if (mode === 'follow-up' && !state.messages.length) return
+    await writeAudit(pool, { groupId: binding.group_id, actorId: binding.user_id, category: 'chat', action: '重置 QQ 记账对话', source: groupOpenid ? 'qq-group' : 'qq-private' })
     await saveState({ messages: [] })
     return '已清除本次待处理内容。'
   }
@@ -373,7 +375,7 @@ async function handleMessage(chat, event, message) {
   }
   if (!result.expenses?.length) {
     if (automatic && !result.reply) return
-    let answer = /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply) ? result.reply : `${result.reply}\n请补充账单的收支类型、金额、日期和分类。`
+    let answer = /[?？]|请(?:问|补充|提供|确认|告知|说明|填写)|能否|是否/.test(result.reply) ? result.reply : `${result.reply}\n请补充账单的收支类型、金额和分类。`
     if (groupOpenid) answer += '\n群内已开启全部消息接收时，10 分钟内直接回复即可继续；否则请 @机器人 回复。'
     await saveState({ messages: [...messages, { role: 'assistant', content: answer }].slice(-10) })
     return answer

@@ -105,3 +105,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     FOREIGN KEY (group_id) REFERENCES ledger_groups(id) ON DELETE CASCADE,
     FOREIGN KEY (created_by) REFERENCES accounts(id), FOREIGN KEY (assignee_id) REFERENCES accounts(id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    group_id INT UNSIGNED NULL, group_name VARCHAR(80) NOT NULL DEFAULT '',
+    actor_id INT UNSIGNED NULL, actor_name VARCHAR(80) NOT NULL,
+    category VARCHAR(20) NOT NULL, action VARCHAR(80) NOT NULL, entity_id VARCHAR(80) NULL,
+    source VARCHAR(20) NOT NULL, outcome VARCHAR(16) NOT NULL DEFAULT 'success',
+    details JSON NOT NULL, created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    INDEX audit_group_id_idx (group_id, id), INDEX audit_actor_id_idx (actor_id, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

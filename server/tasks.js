@@ -1,3 +1,4 @@
+import { writeAudit, auditSource } from './audit.js'
 import { randomUUID } from 'node:crypto'
 import { GroupError, managesGroup } from './groups.js'
 import { getGroupBinding } from './qq-group.js'
@@ -91,7 +92,7 @@ async function destination(connection, groupId, assigneeId, target) {
   return row?.openid || ''
 }
 
-export async function createTask(pool, groupId, userId, body, qqGroup) {
+export async function createTask(pool, groupId, userId, body, qqGroup, source = qqGroup ? 'qq-group' : 'web') {
   const requestId = body.requestId || randomUUID()
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(requestId)) throw new GroupError(400, '任务请求编号无效。')
   const assigneeId = body.assigneeId == null ? userId : Number(body.assigneeId)
@@ -109,11 +110,12 @@ export async function createTask(pool, groupId, userId, body, qqGroup) {
       (group_id,created_by,assignee_id,title,details,kind,due_at,target,target_openid,request_id,recurrence) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
     [groupId, userId, assigneeId, task.title, task.details, task.kind, task.dueAt, task.target, openid, task.requestId, task.recurrence ? JSON.stringify(task.recurrence) : null])
     const [[row]] = await connection.execute('SELECT * FROM tasks WHERE id = ?', [result.insertId])
+    await writeAudit(connection, { groupId, actorId: userId, category: 'task', action: '创建任务', entityId: row.id, source, details: { after: serializeTask(row) } })
     return serializeTask(row)
   })
 }
 
-export async function updateTask(pool, groupId, userId, id, body, qqGroup) {
+export async function updateTask(pool, groupId, userId, id, body, qqGroup, source = qqGroup ? 'qq-group' : 'web') {
   if (!validId(id)) throw new GroupError(400, '任务编号无效。')
   return transaction(pool, async (connection) => {
     const role = await lockMember(connection, groupId, userId, qqGroup)
@@ -145,6 +147,8 @@ export async function updateTask(pool, groupId, userId, id, body, qqGroup) {
         delivery_status='none',delivery_error=NULL,delivery_attempts=0,delivered_at=NULL,completed_at=NULL,recurrence=? WHERE id=?`, [validated.dueAt, current, validated.recurrence ? JSON.stringify(validated.recurrence) : null, id])
     } else throw new GroupError(400, '任务操作无效。')
     const [[row]] = await connection.execute('SELECT * FROM tasks WHERE id=?', [id])
+    const action = body.action === 'retry-delivery' ? '重试任务通知' : body.action === 'reschedule' ? '修改任务时间' : body.status === 'completed' ? '完成任务' : '取消任务'
+    await writeAudit(connection, { groupId, actorId: userId, category: 'task', action, entityId: id, source, details: { before: serializeTask(task), after: serializeTask(row) } })
     return serializeTask(row)
   })
 }
@@ -157,10 +161,14 @@ export function registerTaskRoutes(app, { pool, requireAuth, requireGroupMember 
     response.set('Cache-Control','no-store').json({ tasks: rows.map(serializeTask), groupBound: Boolean(binding) })
   })
   app.post('/api/groups/:groupId/tasks', requireAuth, requireGroupMember, async (request, response) => {
-    response.status(201).json({ task: await createTask(pool, request.group.id, request.user.id, request.body || {}, request.qqGroup) })
+    const task = await createTask(pool, request.group.id, request.user.id, request.body || {}, request.qqGroup, auditSource(request))
+    request.auditRecorded = true
+    response.status(201).json({ task })
   })
   app.post('/api/groups/:groupId/tasks/action', requireAuth, requireGroupMember, async (request, response) => {
-    response.json({ task: await updateTask(pool, request.group.id, request.user.id, request.body?.id, request.body || {}, request.qqGroup) })
+    const task = await updateTask(pool, request.group.id, request.user.id, request.body?.id, request.body || {}, request.qqGroup, auditSource(request))
+    request.auditRecorded = true
+    response.json({ task })
   })
 }
 
@@ -205,6 +213,7 @@ export async function processDueTask(pool, { generate }) {
           VALUES (?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id`,
         [task.group_id,task.created_by,task.assignee_id,task.title,task.details,task.kind,task.due_at,task.target,task.target_openid,`repeat-${task.id}-${new Date(utc(task.due_at)).valueOf()}`,task.id])
         await connection.execute("UPDATE tasks SET status='pending',due_at=?,lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?",[next,task.id,task.lease_token])
+        await writeAudit(connection, { groupId: task.group_id, category: 'task', action: '生成重复任务执行记录', entityId: task.id, source: 'system', details: { title: task.title, dueAt: utc(task.due_at), after: { dueAt: utc(next) } } })
       })
       return true
     }
@@ -223,11 +232,17 @@ export async function processDueTask(pool, { generate }) {
     }
     if (task.kind !== 'reminder' && (typeof result !== 'string' || !result.trim())) throw new Error('自动任务未返回结果。')
     await eligible(pool, task)
-    await pool.execute(`UPDATE tasks SET status=?,result=?,completed_at=?,error=NULL,delivery_status='pending',delivery_after=UTC_TIMESTAMP(),
-      lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?`,
-    [task.kind === 'reminder' ? 'waiting' : 'completed', result?.slice(0,12000) || null, task.kind === 'reminder' ? null : sqlDate(new Date()), task.id, task.lease_token])
+    await transaction(pool, async (connection) => {
+      const [updated] = await connection.execute(`UPDATE tasks SET status=?,result=?,completed_at=?,error=NULL,delivery_status='pending',delivery_after=UTC_TIMESTAMP(),
+        lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?`,
+      [task.kind === 'reminder' ? 'waiting' : 'completed', result?.slice(0,12000) || null, task.kind === 'reminder' ? null : sqlDate(new Date()), task.id, task.lease_token])
+      if (updated.affectedRows) await writeAudit(connection, { groupId: task.group_id, category: 'task', action: task.kind === 'reminder' ? '任务到期' : '自动执行任务完成', entityId: task.id, source: 'system', details: { title: task.title, status: task.kind === 'reminder' ? 'waiting' : 'completed' } })
+    })
   } catch (error) {
-    await pool.execute("UPDATE tasks SET status='failed',error=?,delivery_status='pending',delivery_after=UTC_TIMESTAMP(),lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?", [error.message.slice(0,500), task.id, task.lease_token])
+    await transaction(pool, async (connection) => {
+      const [updated] = await connection.execute("UPDATE tasks SET status='failed',error=?,delivery_status='pending',delivery_after=UTC_TIMESTAMP(),lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?", [error.message.slice(0,500), task.id, task.lease_token])
+      if (updated.affectedRows) await writeAudit(connection, { groupId: task.group_id, category: 'task', action: '自动执行任务失败', entityId: task.id, source: 'system', outcome: 'failed', details: { title: task.title, status: 'failed' } })
+    })
   }
   return true
 }
@@ -245,11 +260,15 @@ export async function deliverTask(pool, { send }) {
         : `${person.display_name}，自动任务已完成 #${task.id}\n${task.title}\n${task.result}`
       await send(task, content.length > 1850 ? `${content.slice(0,1800)}\n（完整内容请查看任务页面）` : content)
       await connection.execute("UPDATE tasks SET delivery_status='sent',delivery_error=NULL,delivered_at=UTC_TIMESTAMP(),lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?", [task.id, task.lease_token])
+      await writeAudit(connection, { groupId: task.group_id, category: 'task', action: '发送任务通知', entityId: task.id, source: 'system', details: { title: task.title, target: task.target, deliveryStatus: 'sent' } })
     })
   } catch (error) {
     const retry = task.delivery_attempts < 3
-    await pool.execute(`UPDATE tasks SET delivery_status=?,delivery_error=?,delivery_after=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 1 MINUTE),
-      lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?`, [retry ? 'pending' : 'failed', error.message.slice(0,500), task.id, task.lease_token])
+    await transaction(pool, async (connection) => {
+      const [updated] = await connection.execute(`UPDATE tasks SET delivery_status=?,delivery_error=?,delivery_after=DATE_ADD(UTC_TIMESTAMP(),INTERVAL 1 MINUTE),
+        lease_token=NULL,lease_until=NULL WHERE id=? AND lease_token=?`, [retry ? 'pending' : 'failed', error.message.slice(0,500), task.id, task.lease_token])
+      if (updated.affectedRows) await writeAudit(connection, { groupId: task.group_id, category: 'task', action: retry ? '任务通知失败，等待重试' : '任务通知发送失败', entityId: task.id, source: 'system', outcome: 'failed', details: { title: task.title, deliveryStatus: retry ? 'pending' : 'failed' } })
+    })
   }
   return true
 }

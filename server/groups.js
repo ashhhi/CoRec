@@ -1,3 +1,5 @@
+import { auditRequest } from './audit.js'
+
 export class GroupError extends Error {
   constructor(status, message) {
     super(message)
@@ -91,7 +93,36 @@ export function registerGroupRoutes(app, { pool, requireAuth, invitePattern, use
     const role = await memberRole(connection, group.id, request.user.id)
     if (!role || (roles && !roles.includes(role))) throw new GroupError(403, '你没有执行此操作的权限。')
     if (role === 'owner' && group.created_by !== request.user.id) throw new GroupError(403, '只有当前群主可以执行此操作。')
-    return run(connection, group, role)
+    const targetId = Number(request.params.userId || request.body?.userId) || null
+    let target
+    if (targetId) {
+      const [[person]] = await connection.execute('SELECT display_name FROM accounts WHERE id=?', [targetId])
+      target = { targetUserId: targetId, targetName: person?.display_name || `成员 #${targetId}` }
+    }
+    const before = { name: group.name, userId: group.created_by }
+    if (targetId && request.path.includes('/members/')) before.role = await memberRole(connection, group.id, targetId)
+    const result = await run(connection, group, role)
+    if (request.method !== 'GET') {
+      const path = request.path
+      const action = path.endsWith('/ledger/reset') ? '重置全部账单'
+        : path.endsWith('/transfer-owner') ? '转让群主'
+        : path.endsWith('/membership') ? '退出群组'
+        : path.includes('/requests/') ? (request.body.action === 'approve' ? '批准加入群组' : '拒绝加入群组')
+        : path.includes('/invitations') ? (request.method === 'DELETE' ? '撤回成员邀请' : '邀请成员')
+        : path.includes('/members/') ? (request.method === 'DELETE' ? '移除成员' : request.body.role === 'admin' ? '设置管理员' : '取消管理员')
+        : request.method === 'DELETE' ? '解散群组' : '修改群组名称'
+      const details = { ...target }
+      if (path.endsWith('/ledger/reset')) details.deletedCount = result
+      else if (path.endsWith('/transfer-owner')) Object.assign(details, { before: { userId: before.userId }, after: { userId: targetId } })
+      else if (path.includes('/members/') && request.method === 'PATCH') Object.assign(details, { before: { role: before.role }, after: { role: request.body.role } })
+      else if (path.includes('/requests/')) details.action = request.body.action
+      else if (path.includes('/invitations')) { if (request.body?.username) details.username = request.body.username }
+      else if (path.endsWith('/membership') || path.includes('/members/')) details.action = 'leave'
+      else if (request.method === 'DELETE') details.before = { name: group.name }
+      else Object.assign(details, { before: { name: group.name }, after: { name: request.body.name } })
+      await auditRequest(connection, request, { groupId: group.id, groupName: group.name, category: 'group', action, entityId: targetId || group.id, details })
+    }
+    return result
   })
 
   app.post('/api/groups/:groupId/ledger/reset', requireAuth, async (request, response) => {
@@ -122,6 +153,7 @@ export function registerGroupRoutes(app, { pool, requireAuth, invitePattern, use
       if (await memberRole(connection, group.id, request.user.id)) throw new GroupError(409, '你已经在这个群组里了。')
       await connection.execute(`INSERT INTO group_join_requests (group_id, user_id) VALUES (?, ?)
         ON DUPLICATE KEY UPDATE created_at = IF(status = 'pending', created_at, CURRENT_TIMESTAMP), status = 'pending'`, [group.id, request.user.id])
+      await auditRequest(connection, request, { groupId: group.id, groupName: group.name, category: 'group', action: '申请加入群组', details: { status: 'pending' } })
       return { groupId: group.id, groupName: group.name, status: 'pending' }
     })
     response.status(202).json({ request: result })
@@ -141,7 +173,8 @@ export function registerGroupRoutes(app, { pool, requireAuth, invitePattern, use
   app.delete('/api/group-requests/:groupId', requireAuth, async (request, response) => {
     await transaction(pool, async (connection) => {
       const groupId = validId(request.params.groupId)
-      await lockGroup(connection, groupId)
+      const group = await lockGroup(connection, groupId)
+      await auditRequest(connection, request, { groupId, groupName: group.name, category: 'group', action: '撤回入群申请' })
       await connection.execute('DELETE FROM group_join_requests WHERE group_id = ? AND user_id = ?', [groupId, request.user.id])
     })
     response.json({ ok: true })
@@ -156,6 +189,7 @@ export function registerGroupRoutes(app, { pool, requireAuth, invitePattern, use
       if (!invitation) throw new GroupError(404, '邀请已失效。')
       if (action === 'accept') await addMember(connection, group.id, request.user.id)
       else await connection.execute('DELETE FROM group_invitations WHERE group_id = ? AND user_id = ?', [group.id, request.user.id])
+      await auditRequest(connection, request, { groupId: group.id, groupName: group.name, category: 'group', action: action === 'accept' ? '接受群组邀请' : '拒绝群组邀请' })
       return { id: group.id, name: group.name, role: 'member' }
     })
     response.json({ ok: true, ...(action === 'accept' ? { group } : {}) })

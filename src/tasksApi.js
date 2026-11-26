@@ -8,7 +8,7 @@ export function formatTaskTime(value) {
 
 export async function taskApi(groupId, path = '', options = {}) {
   const response = await fetch(`/api/groups/${groupId}/tasks${path}`, {
-    ...options, headers: { 'Content-Type': 'application/json' },
+    ...options, headers: { 'Content-Type': 'application/json', ...options.headers },
     ...(options.body ? { body: JSON.stringify(options.body) } : {}),
   })
   const data = await response.json()

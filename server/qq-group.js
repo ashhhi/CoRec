@@ -1,3 +1,4 @@
+import { writeAudit } from './audit.js'
 import { createHash, randomBytes } from 'node:crypto'
 
 export const groupCodePattern = /^[A-F0-9]{16}$/
@@ -122,6 +123,7 @@ export async function confirmGroupBinding(pool, groupOpenid, memberOpenid, code)
       const [[identity]] = await connection.execute('SELECT user_id FROM qq_group_members WHERE group_id = ? AND member_openid = ?', [request.group_id, memberOpenid])
       if (!identity) await connection.execute('INSERT INTO qq_group_members (group_id, member_openid, user_id) VALUES (?, ?, ?)', [request.group_id, memberOpenid, request.user_id])
       await connection.execute('DELETE FROM qq_group_bind_requests WHERE request_hash = ?', [request.request_hash])
+      await writeAudit(connection, { groupId: request.group_id, actorId: request.user_id, category: 'binding', action: '完成 QQ 群身份绑定', source: 'qq-group' })
       return true
     })
   } catch (error) {

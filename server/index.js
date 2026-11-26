@@ -11,7 +11,8 @@ import { ensureGroupSchema, GroupError, managesGroup, registerGroupRoutes } from
 import { ensureTaskSchema, registerTaskRoutes, startTaskWorker } from './tasks.js'
 import { sendTaskNotification } from './qq-api.js'
 import { getAccountBalances } from './ledger.js'
-import { validateIncomeSavings } from './ledger-protocol.js'
+import { ensureAuditSchema, auditMiddleware, auditRequest, registerAuditRoutes } from './audit.js'
+import { validateIncomeSavings, ledgerTimeNow, resolveEntryTime } from './ledger-protocol.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -44,6 +45,7 @@ app.set('trust proxy', 1)
 app.use('/api/groups/:groupId/llm/chat', express.json({ limit: '6mb' }))
 app.use(express.json({ limit: '20kb' }))
 app.use(cookieParser())
+app.use(auditMiddleware(pool))
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -334,6 +336,7 @@ async function ensureSchema() {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`)
   await ensureQqGroupSchema(pool)
   await ensureTaskSchema(pool)
+  await ensureAuditSchema(pool)
 }
 
 app.get('/api/health', async (_request, response) => {
@@ -365,7 +368,8 @@ app.post('/api/auth/register', authLimiter, async (request, response) => {
     const passwordHash = await bcrypt.hash(password, 12)
     const [result] = await pool.execute('INSERT INTO accounts (username, display_name, password_hash) VALUES (?, ?, ?)', [username.trim(), displayName.trim(), passwordHash])
     await createSession(result.insertId, response)
-    response.status(201).json({ user: { id: result.insertId, username: username.trim(), displayName: displayName.trim() } })
+    request.user = { id: result.insertId, username: username.trim(), displayName: displayName.trim() }
+    response.status(201).json({ user: request.user })
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') return response.status(409).json({ error: '这个账号已经被注册。' })
     throw error
@@ -382,7 +386,8 @@ app.post('/api/auth/login', authLimiter, async (request, response) => {
     return response.status(401).json({ error: '账号或密码不正确。' })
   }
   await createSession(rows[0].id, response)
-  response.json({ user: { id: rows[0].id, username: rows[0].username, displayName: rows[0].display_name } })
+  request.user = { id: rows[0].id, username: rows[0].username, displayName: rows[0].display_name }
+  response.json({ user: request.user })
 })
 
 app.post('/api/auth/logout', requireAuth, async (request, response) => {
@@ -441,6 +446,7 @@ app.post('/api/groups', requireAuth, async (request, response) => {
       'UPDATE expenses SET group_id = ?, created_by = ? WHERE group_id IS NULL',
       [result.insertId, request.user.id],
     )
+    await auditRequest(connection, request, { groupId: result.insertId, groupName: name, category: 'group', action: '创建群组', entityId: result.insertId, details: { after: { name } } })
     await connection.commit()
     response.status(201).json({ group: { id: result.insertId, name, inviteCode, role: 'owner' } })
   } catch (error) {
@@ -453,6 +459,7 @@ app.post('/api/groups', requireAuth, async (request, response) => {
 
 registerGroupRoutes(app, { pool, requireAuth, invitePattern, usernamePattern })
 registerTaskRoutes(app, { pool, requireAuth, requireGroupMember })
+registerAuditRoutes(app, { pool, requireAuth, requireGroupMember })
 
 app.get('/api/groups/:groupId', requireAuth, requireGroupMember, async (request, response) => {
   const [members] = await pool.execute(`
@@ -496,8 +503,16 @@ app.post('/api/groups/:groupId/qq/bind-code', requireAuth, requireGroupMember, a
 
 app.delete('/api/qq/binding', requireAuth, async (request, response) => {
   if (request.get('X-CoRec-Bot-Token')) return response.status(403).json({ error: '请在网站上解除绑定。' })
-  await pool.execute('DELETE FROM qq_bindings WHERE user_id = ?', [request.user.id])
-  await pool.execute('DELETE FROM qq_bind_codes WHERE user_id = ?', [request.user.id])
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    const [[binding]] = await connection.execute('SELECT group_id FROM qq_bindings WHERE user_id=? FOR UPDATE', [request.user.id])
+    await connection.execute('DELETE FROM qq_bindings WHERE user_id = ?', [request.user.id])
+    await connection.execute('DELETE FROM qq_bind_codes WHERE user_id = ?', [request.user.id])
+    await auditRequest(connection, request, { groupId: binding?.group_id, category: 'binding', action: '解除 QQ 私聊绑定' })
+    await connection.commit()
+  } catch (error) { await connection.rollback(); throw error }
+  finally { connection.release() }
   response.json({ ok: true })
 })
 
@@ -677,16 +692,18 @@ app.get('/api/groups/:groupId/ledger', requireAuth, requireGroupMember, async (r
   response.json({ expenses: rows.map(serializeExpense), balance: balances.activityCents / 100, savingsBalance: balances.savingsCents / 100 })
 })
 
-function validateExpenseInput(value, request) {
+function validateExpenseInput(value, request, defaultTime) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new GroupError(400, '账单内容无效。')
-  const { date, time = null, merchant, productName = '', note = '', category, amount, savingsAmount = 0, payerId, type = 'expense', transferDirection = null } = value
+  const { date, time: suppliedTime = null, merchant, productName = '', note = '', category, amount, savingsAmount = 0, payerId, type = 'expense', transferDirection = null } = value
   const parsedAmount = Number(amount)
   const parsedDate = typeof date === 'string' && datePattern.test(date) ? new Date(`${date}T00:00:00Z`) : null
   const validDate = parsedDate && !Number.isNaN(parsedDate.valueOf()) && parsedDate.toISOString().slice(0, 10) === date
   const payerUserId = Number(payerId)
   if (request.qqGroup && payerUserId !== request.user.id) throw new GroupError(403, 'QQ 群记账仅支持记在发送者名下。')
   if (!validDate || typeof merchant !== 'string' || !merchant.trim() || merchant.trim().length > 100) throw new GroupError(400, '请填写有效日期和账单名称。')
-  if (time !== null && (typeof time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) throw new GroupError(400, '时间格式无效。')
+  let time
+  try { time = resolveEntryTime(suppliedTime, defaultTime) }
+  catch (error) { throw new GroupError(400, error.message) }
   if (!Number.isFinite(parsedAmount) || parsedAmount < 0.01 || parsedAmount > 100000000) throw new GroupError(400, '请输入有效金额。')
   const allowedCategories = type === 'transfer' ? new Set(['存款']) : type === 'income' ? incomeCategories : categories
   if (!['expense', 'income', 'transfer'].includes(type) || !allowedCategories.has(category) || !Number.isSafeInteger(payerUserId) || payerUserId < 1) throw new GroupError(400, '账目类型、分类或成员无效。')
@@ -706,8 +723,9 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
   const batch = Object.hasOwn(request.body || {}, 'expenses')
   const input = batch ? request.body.expenses : [request.body]
   if (!Array.isArray(input) || input.length < 1 || input.length > 50) throw new GroupError(400, '每次请提交 1 到 50 笔账单。')
+  const defaultTime = ledgerTimeNow().slice(11)
   const entries = input.map((value, index) => {
-    try { return validateExpenseInput(value, request) }
+    try { return validateExpenseInput(value, request, defaultTime) }
     catch (error) { throw new GroupError(error.status || 400, `${batch ? `第 ${index + 1} 笔：` : ''}${error.message}`) }
   })
   const confirmedDuplicateIds = request.body?.confirmedDuplicateIds || []
@@ -759,9 +777,67 @@ app.post('/api/groups/:groupId/expenses', requireAuth, requireGroupMember, async
       FROM expenses e LEFT JOIN accounts a ON a.id=e.payer_user_id WHERE e.group_id=? AND e.id IN (${ids.map(() => '?').join(',')})
     `, [request.group.id, ...ids])
     const saved = new Map(rows.map((row) => [row.id, serializeExpense(row)]))
+    for (const id of ids) await auditRequest(connection, request, { category: 'ledger', action: '新增账单', entityId: id, details: { after: saved.get(id) } })
     await connection.commit()
     const expenses = ids.map((id) => saved.get(id))
     response.status(201).json(batch ? { expenses } : { expense: expenses[0] })
+  } catch (error) {
+    await connection.rollback()
+    throw error
+  } finally { connection.release() }
+})
+
+app.patch('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember, async (request, response) => {
+  const id = Number(request.params.id)
+  if (!Number.isSafeInteger(id) || id < 1) throw new GroupError(400, '账单编号无效。')
+  if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) throw new GroupError(400, '账单内容无效。')
+  const confirmedDuplicateIds = request.body.confirmedDuplicateIds || []
+  if (!Array.isArray(confirmedDuplicateIds) || !confirmedDuplicateIds.every((value) => Number.isSafeInteger(value) && value > 0)) throw new GroupError(400, '重复账单确认信息无效。')
+  const connection = await pool.getConnection()
+  try {
+    await connection.beginTransaction()
+    await connection.execute('SELECT id FROM ledger_groups WHERE id=? FOR UPDATE', [request.group.id])
+    const [[member]] = await connection.execute('SELECT user_id, role FROM group_members WHERE group_id=? AND user_id=?', [request.group.id, request.user.id])
+    if (!member) throw new GroupError(403, '你已离开该群组。')
+    if (!await hasCurrentQqGroupBinding(connection, request, request.group.id)) throw new GroupError(403, 'QQ 群绑定已失效。')
+    const [[record]] = await connection.execute(`SELECT e.*, DATE_FORMAT(e.date, '%Y-%m-%d') AS date,
+      TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, e.payer AS payer_name
+      FROM expenses e WHERE e.id=? AND e.group_id=?`, [id, request.group.id])
+    if (!record) throw new GroupError(404, '账单不存在。')
+    const manager = managesGroup(member.role)
+    if (!manager && record.payer_user_id !== request.user.id) throw new GroupError(403, '只能编辑自己名下的账单。')
+    const input = { ...serializeExpense(record), ...request.body }
+    const entry = validateExpenseInput(input, request, ledgerTimeNow().slice(11))
+    if (!manager && entry.payerUserId !== request.user.id) throw new GroupError(403, '普通成员不能修改账单归属。')
+    // An existing record without a time keeps that value when other fields change.
+    if (input.time === null || input.time === '') entry.time = null
+    const [[payer]] = await connection.execute(`SELECT a.display_name FROM group_members gm
+      JOIN accounts a ON a.id=gm.user_id WHERE gm.group_id=? AND gm.user_id=?`, [request.group.id, entry.payerUserId])
+    // Preserve historical attribution when a former member's record is edited.
+    if (!payer && entry.payerUserId !== record.payer_user_id) throw new GroupError(400, '付款人必须是群组成员。')
+    const balances = await getAccountBalances(connection, request.group.id)
+    const oldSavings = record.entry_type === 'income' ? Number(record.income_savings_cents) : record.entry_type !== 'transfer' ? 0 : record.transfer_direction === 'to_savings' ? Number(record.amount_cents) : -Number(record.amount_cents)
+    const newSavings = entry.type === 'income' ? entry.incomeSavingsCents : entry.type !== 'transfer' ? 0 : entry.transferDirection === 'to_savings' ? entry.amountCents : -entry.amountCents
+    if (balances.savingsCents - oldSavings + newSavings < 0) throw new GroupError(409, '修改后存款余额不足，请先处理相关取出记录。')
+    const [duplicates] = await connection.execute(`SELECT e.*, DATE_FORMAT(e.date, '%Y-%m-%d') AS date,
+      TIME_FORMAT(e.transaction_time, '%H:%i') AS transaction_time, COALESCE(a.display_name, e.payer) AS payer_name
+      FROM expenses e LEFT JOIN accounts a ON a.id=e.payer_user_id
+      WHERE e.group_id=? AND e.date=? AND e.entry_type=? AND e.amount_cents=? AND e.transfer_direction <=> ? AND e.id<>?
+      ORDER BY e.id DESC`, [request.group.id, entry.date, entry.type, entry.amountCents, entry.transferDirection, id])
+    if (duplicates.some((row) => !confirmedDuplicateIds.includes(row.id))) {
+      await connection.rollback()
+      return response.status(409).json({ code: 'POSSIBLE_DUPLICATE', error: '发现可能重复的账单，请确认是否继续。', duplicates: duplicates.map(serializeExpense) })
+    }
+    const payerName = payer?.display_name || record.payer
+    await connection.execute(`UPDATE expenses SET entry_type=?, transfer_direction=?, date=?, transaction_time=?, merchant=?,
+      product_name=?, note=?, category=?, amount_cents=?, income_savings_cents=?, payer_user_id=?, payer=? WHERE id=? AND group_id=?`,
+    [entry.type, entry.transferDirection, entry.date, entry.time, entry.merchant, entry.productName, entry.note, entry.category, entry.amountCents, entry.incomeSavingsCents, entry.payerUserId, payerName, id, request.group.id])
+    const after = { id, type: entry.type, transferDirection: entry.transferDirection, date: entry.date, time: entry.time, merchant: entry.merchant, productName: entry.productName, note: entry.note, category: entry.category, amount: entry.amountCents / 100, savingsAmount: entry.incomeSavingsCents / 100, payerId: entry.payerUserId, payer: payerName }
+    await auditRequest(connection, request, { category: 'ledger', action: '编辑账单', entityId: id, details: { before: serializeExpense(record), after } })
+    await connection.commit()
+    response.json({ expense: { id, type: entry.type, transferDirection: entry.transferDirection, date: entry.date, time: entry.time,
+      merchant: entry.merchant, productName: entry.productName, note: entry.note, category: entry.category, amount: entry.amountCents / 100,
+      savingsAmount: entry.incomeSavingsCents / 100, payerId: entry.payerUserId, payer: payerName } })
   } catch (error) {
     await connection.rollback()
     throw error
@@ -777,7 +853,7 @@ app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember,
     await connection.execute('SELECT id FROM ledger_groups WHERE id = ? FOR UPDATE', [request.group.id])
     const [[member]] = await connection.execute('SELECT user_id FROM group_members WHERE group_id = ? AND user_id = ?', [request.group.id, request.user.id])
     if (!member) throw new GroupError(403, '你已离开该群组。')
-    const [[record]] = await connection.execute('SELECT entry_type,transfer_direction,amount_cents,income_savings_cents FROM expenses WHERE id=? AND group_id=?', [id,request.group.id])
+    const [[record]] = await connection.execute(`SELECT *, DATE_FORMAT(date,'%Y-%m-%d') AS date, TIME_FORMAT(transaction_time,'%H:%i') AS transaction_time, payer AS payer_name FROM expenses WHERE id=? AND group_id=?`, [id,request.group.id])
     const savingsCredit = record?.entry_type === 'income' ? Number(record.income_savings_cents) : record?.entry_type === 'transfer' && record.transfer_direction === 'to_savings' ? Number(record.amount_cents) : 0
     if (savingsCredit > 0) {
       const balances = await getAccountBalances(connection,request.group.id)
@@ -785,6 +861,7 @@ app.delete('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember,
     }
     const [result] = await connection.execute('DELETE FROM expenses WHERE id = ? AND group_id = ?', [id, request.group.id])
     if (!result.affectedRows) throw new GroupError(404, '账单不存在。')
+    await auditRequest(connection, request, { category: 'ledger', action: '删除账单', entityId: id, details: { before: serializeExpense(record) } })
     await connection.commit()
   } catch (error) {
     await connection.rollback()

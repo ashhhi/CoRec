@@ -7,10 +7,14 @@ export async function saveExpenses(groupId, expenses, confirmedDuplicateIds = []
   return submitExpenses(groupId, { expenses }, confirmedDuplicateIds)
 }
 
-async function submitExpenses(groupId, fields, confirmedDuplicateIds) {
-  const response = await fetch(`/api/groups/${groupId}/expenses`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+export async function updateExpense(groupId, id, expense, confirmedDuplicateIds = []) {
+  return submitExpenses(groupId, expense, confirmedDuplicateIds, id)
+}
+
+async function submitExpenses(groupId, fields, confirmedDuplicateIds, id) {
+  const response = await fetch(`/api/groups/${groupId}/expenses${id ? `/${id}` : ''}`, {
+    method: id ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': 'application/json', ...(!id && Array.isArray(fields.expenses) ? { 'X-CoRec-Source': 'chat' } : {}) },
     body: JSON.stringify({ ...fields, confirmedDuplicateIds }),
   })
   const data = await response.json()

@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Bot, Check, ImagePlus, LockKeyhole, Send, Trash2, X } from 'lucide-react'
 import { describeDuplicate, saveExpenses } from './expenseApi.js'
-import { entryLabel, entrySign, savingsInstructions, transferDirections, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions } from '../server/ledger-protocol.js'
-import { taskInstructions, taskTimeNow } from '../server/task-protocol.js'
+import { entryLabel, entrySign, savingsInstructions, transferDirections, validateIncomeSavings, incomeAllocationLabel, expenseValues, batchInstructions, ledgerTimeNow, resolveEntryTime, resolveEntryDate, ledgerTimeInstructions } from '../server/ledger-protocol.js'
+import { taskInstructions } from '../server/task-protocol.js'
 import { taskApi, formatTaskTime, taskKindLabels, recurrenceLabel } from './tasksApi.js'
 
 const categories = ['餐饮', '交通', '娱乐', '购物', '居住', '其他']
@@ -37,16 +37,14 @@ function extractJson(content) {
   }
 }
 
-function validateExpense(value, members, user) {
+function validateExpense(value, members, user, defaultNow = ledgerTimeNow()) {
   if (!value || typeof value !== 'object') return null
   if (!['expense', 'income', 'transfer'].includes(value.type)) throw new Error('请问这笔账单是收入、支出还是存款转账？')
   const type = value.type
   const amount = Number(value.amount)
-  const date = typeof value.date === 'string' ? value.date : ''
-  const time = typeof value.time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.time) ? value.time : null
-  const dateValue = new Date(`${date}T00:00:00Z`)
-  const validDate = /^\d{4}-\d{2}-\d{2}$/.test(date) && !Number.isNaN(dateValue.valueOf()) && dateValue.toISOString().slice(0, 10) === date
-  if (!validDate || !Number.isFinite(amount) || amount <= 0 || amount > 100000000) throw new Error('请补充有效的账单日期和金额。')
+  const date = resolveEntryDate(value.date, defaultNow.slice(0, 10))
+  const time = resolveEntryTime(value.time, defaultNow.slice(11))
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) throw new Error('请补充有效的账单金额。')
   const validCategories = type === 'transfer' ? ['存款'] : type === 'income' ? incomeCategories : categories
   if (type === 'transfer' && !Object.hasOwn(transferDirections,value.transferDirection)) throw new Error('请说明是活动账户转入存款，还是存款转回活动账户。')
   if (!validCategories.includes(value.category)) throw new Error('请补充这笔账单的分类。')
@@ -69,10 +67,10 @@ function validateExpense(value, members, user) {
 }
 
 async function parseExpense(messages, members, user, groupId) {
-  const today = new Date()
-  const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-  const expensePrompt = `你是 CoRec 的共同账本助手。今天是 ${todayIso}。当前群组成员：${members.map((member) => `${member.displayName} (id=${member.id})`).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。只返回一个 JSON 对象，不要 Markdown。格式：{"reply":"给用户的简短中文回复","expenses":[]}。用户上传图片时，默认用户希望提取图片中的账单并记账，除非用户明确提出其他用途。结合图片、文字和后续回答提取信息；若图片难以辨认，或收支类型、实际金额、日期、分类无法确定，直接向用户询问缺失信息，expenses 必须为空数组，不要猜测金额或日期。信息齐全后返回 expenses 数组，每笔对象，字段为 {"type":"expense、income 或 transfer","savingsAmount":数字,"date":"YYYY-MM-DD","time":"HH:mm 或 null","amount":数字,"category":"分类","merchant":"商家名称，可省略","productName":"商品名，可省略","note":"备注","payerName":"群组成员显示名字"}。商家名称和商品名分别填写；merchant 只能填写明确出现的实际商家名称，不能填消费描述，例如“和阿禾吃饭”或“打车”，此类描述可放在 note。不要将商家名称填入商品名；商品名不明确时留空。仅在图片或用户明确提供时间时填写 24 小时制 time，否则填 null。支出使用支出分类，收入使用收入分类；未提供商家名称时 merchant 可以省略。相对日期按今天换算。付款人或收入归属必须从群组成员中选择；未提成员时使用 ${user.displayName}。文本记账也要在信息不足时追问。不要声称账单已保存，系统会负责保存。`
-  const systemPrompt = `${expensePrompt}\n${savingsInstructions()}\n${batchInstructions()}\n${taskInstructions(taskTimeNow())}`
+  const now = ledgerTimeNow()
+  const todayIso = now.slice(0, 10)
+  const expensePrompt = `你是 CoRec 的共同账本助手。今天是 ${todayIso}，当前香港时间 ${now}（UTC+8）。当前群组成员：${members.map((member) => `${member.displayName} (id=${member.id})`).join('、')}。支出分类：${categories.join('、')}。收入分类：${incomeCategories.join('、')}。只返回一个 JSON 对象，不要 Markdown。格式：{"reply":"给用户的简短中文回复","expenses":[]}。用户上传图片时，默认用户希望提取图片中的账单并记账，除非用户明确提出其他用途。结合图片、文字和后续回答提取信息；若图片难以辨认，或收支类型、实际金额、分类无法确定，直接向用户询问缺失信息，expenses 必须为空数组，不要猜测金额，未提日期默认今天。信息齐全后返回 expenses 数组，每笔对象，字段为 {"type":"expense、income 或 transfer","savingsAmount":数字,"date":"YYYY-MM-DD或null","time":"HH:mm 或 null","amount":数字,"category":"分类","merchant":"商家名称，可省略","productName":"商品名，可省略","note":"备注","payerName":"群组成员显示名字"}。商家名称和商品名分别填写；merchant 只能填写明确出现的实际商家名称，不能填消费描述，例如“和阿禾吃饭”或“打车”，此类描述可放在 note。不要将商家名称填入商品名；商品名不明确时留空。支出使用支出分类，收入使用收入分类；未提供商家名称时 merchant 可以省略。相对日期按今天换算。付款人或收入归属必须从群组成员中选择；未提成员时使用 ${user.displayName}。文本记账也要在信息不足时追问。不要声称账单已保存，系统会负责保存。`
+  const systemPrompt = `${expensePrompt}\n${ledgerTimeInstructions()}\n${savingsInstructions()}\n${batchInstructions()}\n${taskInstructions(now)}`
   const recent = messages.slice(-14)
   const lastImageId = [...recent].reverse().find((message) => message.image)?.id
   const inputMessages = [{ role: 'system', content: systemPrompt }, ...recent.map(({ id, role, content, image }) => ({ role, content: content || (image ? '请提取这张图片中的账单并记账；信息不足时询问缺失信息。' : ''), ...(id === lastImageId ? { image } : {}) }))]
@@ -89,7 +87,7 @@ async function parseExpense(messages, members, user, groupId) {
       response = await fetch(`/api/groups/${groupId}/llm/chat`, {
         method: 'POST',
         signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-CoRec-Source': 'chat' },
         body: JSON.stringify({ messages: input }),
       })
     } finally {
@@ -110,16 +108,16 @@ async function parseExpense(messages, members, user, groupId) {
   if (isImageOnly && result.intent !== 'task' && !result.task && !result.taskAction && !result.expense && !result.expenses?.length && !asksForInformation(result.reply)) {
     const retryMessages = inputMessages.map((message, index) => index === 0 ? {
       ...message,
-      content: `${message.content} 用户刚刚仅发送图片，即要求记账。不要只描述图片：如果图片中能确定收支类型、金额、日期及分类，必须在 expenses 数组中填写每笔账目；否则 reply 必须明确询问无法确定的字段，expenses 为空数组。`,
+      content: `${message.content} 用户刚刚仅发送图片，即要求记账。不要只描述图片：如果图片中能确定收支类型、金额及分类，必须在 expenses 数组中填写每笔账目；否则 reply 必须明确询问无法确定的字段，expenses 为空数组。`,
     } : message)
     result = await requestModel(retryMessages)
     if (!result.expense && !result.expenses?.length && !asksForInformation(result.reply)) {
-      result.reply = `${typeof result.reply === 'string' ? `${result.reply}\n` : ''}请补充这笔账单的收支类型、金额、日期和分类，以便记账。`
+      result.reply = `${typeof result.reply === 'string' ? `${result.reply}\n` : ''}请补充这笔账单的收支类型、金额和分类，以便记账。`
     }
   }
   if (result.intent === 'task' || result.task || result.taskAction) return { intent: 'task', reply: result.reply || '请补充任务内容和时间。', task: result.task, taskAction: result.taskAction }
   try {
-    const expenses = expenseValues(result).map((value) => validateExpense(value, members, user))
+    const expenses = expenseValues(result).map((value) => validateExpense(value, members, user, now))
     return { reply: typeof result.reply === 'string' ? result.reply : '我理解了。', expenses, expense: expenses.length === 1 ? expenses[0] : null }
   } catch (validationError) {
     return { reply: validationError.message, expense: null, expenses: [] }
@@ -196,7 +194,7 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
       const result = await parseExpense(nextMessages, members, user, groupId)
       if (result.intent === 'task') {
         if (result.taskAction) {
-          const { task } = await taskApi(groupId, '/action', { method: 'POST', body: result.taskAction })
+          const { task } = await taskApi(groupId, '/action', { method: 'POST', headers: { 'X-CoRec-Source': 'chat' }, body: result.taskAction })
           setMessages((current) => [...current, { id: createId(), role: 'assistant', content: `任务 #${task.id} 已${task.status === 'completed' ? '完成' : '取消'}。` }])
         } else setMessages((current) => [...current, { id: createId(), role: 'assistant', content: result.task ? '已整理好任务，请确认时间和内容后创建。' : result.reply, task: result.task || null }])
         return
@@ -244,7 +242,7 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
     setSavingId(message.id)
     setError('')
     try {
-      const { task } = await taskApi(groupId, '', { method: 'POST', body: { ...message.task, requestId: message.id } })
+      const { task } = await taskApi(groupId, '', { method: 'POST', headers: { 'X-CoRec-Source': 'chat' }, body: { ...message.task, requestId: message.id } })
       setMessages((current) => current.map((item) => item.id === message.id ? { ...item, content: `已创建任务 #${task.id}，提醒及执行结果可在任务页面查看。`, task: { ...task, saved: true } } : item))
     } catch (error) { setError(error.message) } finally { setSavingId('') }
   }
@@ -272,8 +270,23 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
     }
   }
 
-  function clearConversation() {
-    if (!messages.length || window.confirm('清空这段群组对话？')) setMessages([])
+  async function recordChatAction(action) {
+    const response = await fetch(`/api/groups/${groupId}/activity/action`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CoRec-Source': 'chat' }, body: JSON.stringify({ action }) })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || '操作记录保存失败。')
+  }
+
+  async function clearConversation() {
+    if (!messages.length || loading || savingId || !window.confirm('清空这段群组对话？')) return
+    try { await recordChatAction('clear-chat'); setMessages([]) }
+    catch (error) { setError(error.message) }
+  }
+
+  async function dismissDraft(message, kind) {
+    try {
+      await recordChatAction(kind === 'task' ? 'cancel-task-draft' : 'cancel-ledger-draft')
+      setMessages((current) => current.map((item) => item.id === message.id ? kind === 'task' ? { ...item, task: { ...item.task, dismissed: true } } : { ...item, expenseStatus: 'dismissed' } : item))
+    } catch (error) { setError(error.message) }
   }
 
   return <section className="chat-page">
@@ -294,13 +307,13 @@ export default function ChatPage({ groupId, groupName, members, user, onExpenseS
               {message.task.recurrence && <p>{recurrenceLabel(message.task.recurrence)}</p>}
               <p>{formatTaskTime(message.task.dueAt)} · {message.task.target === 'private' ? 'QQ 私聊' : 'QQ 群'}</p>
               {message.task.details && <p>{message.task.details}</p>}
-              {!message.task.saved && !message.task.dismissed && <div className="draft-actions"><button type="button" className="confirm-draft" disabled={savingId === message.id} onClick={() => confirmTask(message)}><Check size={14} />{savingId === message.id ? '正在创建…' : '确认创建任务'}</button><button type="button" onClick={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, task: { ...item.task, dismissed: true } } : item))}>取消</button></div>}
+              {!message.task.saved && !message.task.dismissed && <div className="draft-actions"><button type="button" className="confirm-draft" disabled={savingId === message.id} onClick={() => confirmTask(message)}><Check size={14} />{savingId === message.id ? '正在创建…' : '确认创建任务'}</button><button type="button" onClick={() => dismissDraft(message, 'task')}>取消</button></div>}
               {message.task.dismissed && <p>已取消草稿</p>}
             </div>}
             {draftExpenses(message).length > 0 && <ExpenseDrafts message={message} members={members} saving={Boolean(savingId)}
               onPayerChange={(index, payerId) => updateDraftPayer(message.id, index, payerId)}
               onConfirm={() => confirmExpenses(message)}
-              onDismiss={() => setMessages((current) => current.map((item) => item.id === message.id ? { ...item, expenseStatus: 'dismissed' } : item))} />}
+              onDismiss={() => dismissDraft(message, 'ledger')} />}
           </div>
         </article>
       })}

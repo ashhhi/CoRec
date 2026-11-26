@@ -2,15 +2,16 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 import test from 'node:test'
-import { GroupError } from './groups.js'
-import { validateIncomeSavings } from './ledger-protocol.js'
+import { auditRequest } from './audit.js'
+import { GroupError, managesGroup } from './groups.js'
+import { validateIncomeSavings, resolveEntryTime } from './ledger-protocol.js'
 
 const source = await readFile(new URL('./index.js', import.meta.url), 'utf8')
 const routes = source.slice(source.indexOf('function validateExpenseInput('), source.indexOf('app.use((error, _request'))
 const income = { type: 'income', category: '工资', amount: 3000, savingsAmount: 1000, date: '2026-11-26', payerId: 3, merchant: '工资' }
 const expense = { ...income, type: 'expense', category: '餐饮', merchant: '餐饮', amount: 35, savingsAmount: 0 }
 
-function setup({ duplicate = false, failInsert = 0, savings = 0, record } = {}) {
+function setup({ duplicate = false, failInsert = 0, savings = 0, record, role = 'member', isMember = true, bindingValid = true, payerExists = true } = {}) {
   const handlers = {}
   const writes = []
   const calls = []
@@ -21,10 +22,15 @@ function setup({ duplicate = false, failInsert = 0, savings = 0, record } = {}) 
     async rollback() { writes.length = 0; calls.push('rollback') },
     release() { calls.push('release') },
     async execute(sql, params) {
-      if (sql.includes('FROM ledger_groups')) return [[{ id: 1 }]]
+      if (sql.includes('FROM ledger_groups')) return [[{ id: 1, name: 'Test group' }]]
+      if (sql.includes('SELECT display_name FROM accounts')) return [[{ display_name: 'Ash' }]]
+      if (sql.includes('INSERT INTO audit_logs')) { calls.push('audit'); return [{ insertId: 1 }] }
+      if (sql.includes('SELECT e.*') && sql.includes('WHERE e.id=?')) return [record ? [record] : []]
+      if (sql.includes('WHERE gm.group_id=? AND gm.user_id=?')) return [payerExists ? [{ display_name: 'Ash' }] : []]
       if (sql.includes('JOIN accounts a ON a.id=gm.user_id')) return [[{ id: 3, display_name: 'Ash' }]]
-      if (sql.includes('FROM group_members')) return [[{ user_id: 3 }]]
+      if (sql.includes('FROM group_members')) return [isMember ? [{ user_id: 3, role }] : []]
       if (sql.includes('e.date=?')) return [duplicate ? [{ id: 88 }] : []]
+      if (sql.includes('UPDATE expenses SET')) { calls.push('update'); writes.push(params); return [{ affectedRows: 1 }] }
       if (sql.includes('INSERT INTO expenses')) {
         if (failInsert === writes.length + 1) throw new Error('database unavailable')
         writes.push(params)
@@ -36,18 +42,19 @@ function setup({ duplicate = false, failInsert = 0, savings = 0, record } = {}) 
       throw new Error(`Unexpected query: ${sql}`)
     },
   }
-  const context = vm.createContext({ GroupError, validateIncomeSavings,
+  const context = vm.createContext({ GroupError, managesGroup, auditRequest, validateIncomeSavings, resolveEntryTime, ledgerTimeNow: () => '2026-11-26 16:42',
     categories: new Set(['餐饮']), incomeCategories: new Set(['工资']), datePattern: /^\d{4}-\d{2}-\d{2}$/,
-    app: { post(path, ...callbacks) { handlers.post = callbacks.at(-1) }, delete(path, ...callbacks) { handlers.delete = callbacks.at(-1) } },
-    requireAuth() {}, requireGroupMember() {}, hasCurrentQqGroupBinding: async () => true,
+    app: { post(path, ...callbacks) { handlers.post = callbacks.at(-1) }, patch(path, ...callbacks) { handlers.patch = callbacks.at(-1) }, delete(path, ...callbacks) { handlers.delete = callbacks.at(-1) } },
+    requireAuth() {}, requireGroupMember() {}, hasCurrentQqGroupBinding: async () => bindingValid,
     pool: { async getConnection() { calls.push('connect'); return connection } },
     getAccountBalances: async () => ({ savingsCents: savings }),
-    serializeExpense: (row) => ({ id: row.id, amount: row.amount_cents / 100, savingsAmount: row.income_savings_cents / 100 }),
+    serializeExpense: (row) => ({ id: row.id, type: row.entry_type, transferDirection: row.transfer_direction || null, date: row.date, time: row.transaction_time || null, merchant: row.merchant, productName: row.product_name || '', note: row.note || '', category: row.category, payerId: row.payer_user_id, amount: row.amount_cents / 100, savingsAmount: (row.income_savings_cents || 0) / 100 }),
   })
   vm.runInContext(routes, context)
   const response = { statusCode: 200, status(code) { this.statusCode = code; return this }, json(data) { this.data = data } }
   return { writes, calls, response, committed: () => committed,
     post: (body, qqGroup = false) => handlers.post({ body, qqGroup, user: { id: 3 }, group: { id: 1 } }, response),
+    patch: (body, id = 7) => handlers.patch({ params: { id }, body, user: { id: 3 }, group: { id: 1 } }, response),
     remove: () => handlers.delete({ params: { id: 7 }, user: { id: 3 }, group: { id: 1 } }, response) }
 }
 
@@ -96,4 +103,64 @@ test('single entry API compatibility and savings withdrawal/deletion guards', as
   const deletion = setup({ savings: 99999, record: { entry_type: 'income', income_savings_cents: 100000 } })
   await assert.rejects(deletion.remove(), /余额不足/)
   assert.equal(deletion.calls.includes('delete'), false)
+})
+
+
+test('API fills missing times per batch and preserves explicit times and dates', async () => {
+  const app = setup()
+  await app.post({ expenses: [{ ...expense, date: '2026-11-25', time: null }, { ...income, time: '00:00' }, expense] })
+  assert.deepEqual(app.writes.map((row) => [row[3], row[4]]), [['2026-11-25', '16:42'], ['2026-11-26', '00:00'], ['2026-11-26', '16:42']])
+})
+
+
+const existingIncome = { id: 7, entry_type: 'income', transfer_direction: null, date: '2026-11-25', transaction_time: '09:15', merchant: '公司', product_name: '工资', note: '原备注', category: '工资', amount_cents: 300000, income_savings_cents: 100000, payer_user_id: 3, payer: 'Ash' }
+
+test('edit keeps the record id, preserves unspecified fields and excludes itself from duplicates', async () => {
+  const app = setup({ record: existingIncome, savings: 100000 })
+  await app.patch({ amount: 4000, savingsAmount: 2000 })
+  assert.equal(app.committed(), true)
+  assert.equal(app.response.data.expense.id, 7)
+  assert.equal(app.response.data.expense.savingsAmount, 2000)
+  assert.equal(app.response.data.expense.merchant, '公司')
+  assert.equal(app.response.data.expense.time, '09:15')
+  assert.equal(app.response.data.expense.date, '2026-11-25')
+  assert.equal(app.writes.length, 1)
+  assert.ok(app.calls.includes('update'))
+})
+
+test('only the attributed member or current managers can edit, and members cannot reassign', async () => {
+  const otherRecord = { ...existingIncome, payer_user_id: 4 }
+  const denied = setup({ record: otherRecord, savings: 100000 })
+  await assert.rejects(denied.patch({ amount: 4000 }), /自己名下/)
+  assert.equal(denied.calls.includes('update'), false)
+  const reassign = setup({ record: existingIncome, savings: 100000 })
+  await assert.rejects(reassign.patch({ payerId: 4 }), /不能修改账单归属/)
+  for (const role of ['admin', 'owner']) {
+    const manager = setup({ record: otherRecord, savings: 100000, role })
+    await manager.patch({ amount: 4000, payerId: 3 })
+    assert.equal(manager.committed(), true)
+  }
+  for (const options of [{ isMember: false }, { bindingValid: false }]) {
+    const stale = setup({ ...options, record: existingIncome, savings: 100000 })
+    await assert.rejects(stale.patch({ amount: 4000 }), GroupError)
+    assert.equal(stale.calls.includes('update'), false)
+  }
+})
+
+test('edit validates savings delta, missing records, duplicates and historical times', async () => {
+  const insufficient = setup({ record: existingIncome, savings: 50000 })
+  await assert.rejects(insufficient.patch({ savingsAmount: 0 }), /余额不足/)
+  assert.equal(insufficient.calls.includes('update'), false)
+  const missing = setup()
+  await assert.rejects(missing.patch({ amount: 4000 }), /不存在/)
+  const duplicate = setup({ record: existingIncome, savings: 100000, duplicate: true })
+  await duplicate.patch({ amount: 4000 })
+  assert.equal(duplicate.response.statusCode, 409)
+  assert.equal(duplicate.calls.includes('update'), false)
+  await duplicate.patch({ amount: 4000, confirmedDuplicateIds: [88] })
+  assert.equal(duplicate.committed(), true)
+  const historical = setup({ record: { ...existingIncome, transaction_time: null }, savings: 100000 })
+  await historical.patch({ note: '修改备注' })
+  assert.equal(historical.response.data.expense.time, null)
+  assert.equal(historical.response.data.expense.note, '修改备注')
 })
