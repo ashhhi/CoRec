@@ -1,5 +1,12 @@
 export const transferDirections = { to_savings: '活动账户 → 存款账户', from_savings: '存款账户 → 活动账户' }
 
+export function canEditLedgerEntry(entry, userId, role) {
+  const actorId = Number(userId)
+  if (!entry || !Number.isSafeInteger(actorId) || actorId < 1) return false
+  if (role === 'owner' || role === 'admin') return true
+  return Number(entry.payerId) === actorId
+}
+
 export function ledgerTimeNow(now = new Date()) {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Hong_Kong', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(now)
 }

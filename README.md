@@ -44,7 +44,7 @@ One message or image can contain up to 50 ledger entries. Chat shows each entry 
 
 Ledger dates and times use Hong Kong time (UTC+8). In Chat and QQ, an unspecified date defaults to today and an unspecified time defaults to the current hour and minute: a message such as `午饭花了35元` is recorded as happening now. If a message supplies a date such as today, yesterday, or a weekday without a specific time, that date is kept and the current hour and minute are filled. Explicit times from text or receipts are preserved. The API also fills missing times for new records; existing records are unchanged. Reminder tasks still require an explicit execution time.
 
-Existing records can be edited from their ledger details or the calendar’s daily records. Ordinary members may edit only records attributed to themselves and cannot reassign them; owners and administrators may edit any record in their group. The API checks the current role inside the update transaction, excludes the edited record from duplicate checks, and rejects changes that would leave savings negative. Changes refresh balances, the calendar, and analytics.
+Existing records have an explicit edit button beside the delete button in each ledger row; editing is also available from their details and the calendar’s daily records. The row, details and calendar use the same permission rule. Ordinary members may edit only records attributed to themselves and cannot reassign them; owners and administrators may edit any record in their group. The API checks the current role inside the update transaction, excludes the edited record from duplicate checks, and rejects changes that would leave savings negative. Changes refresh balances, the calendar, and analytics.
 
 ## Operation history
 

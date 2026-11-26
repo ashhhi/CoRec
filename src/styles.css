@@ -445,3 +445,18 @@ button { border: 0; cursor: pointer; }
   .activity-item time { grid-column: 2 / -1; }
   .activity-changes > div { grid-template-columns: 80px minmax(0,1fr); }
 }
+
+.transaction-actions { display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 5px 0; }
+.transaction-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 52px; min-height: 28px; height: 28px; border-radius: 5px; font-size: 10px; }
+.row-edit { color: #bc654f; background: #fff1eb; }
+.row-edit:hover, .row-edit:focus-visible { color: #a74731; background: #ffe5db; }
+@media (min-width: 761px) {
+  .transactions-list .transaction-row, .transactions-list .transaction-header { grid-template-columns: 72px 36px minmax(50px,.55fr) minmax(0,1.2fr) minmax(0,1fr) 72px 110px 52px; }
+}
+@media (max-width: 760px) {
+  .transaction-actions > button { width: 27px; min-height: 28px; height: 28px; }
+  .transaction-actions > button > span { display: none; }
+}
+@media (max-width: 380px) {
+  .transaction-actions > button { width: 24px; }
+}

@@ -4,7 +4,7 @@ import vm from 'node:vm'
 import test from 'node:test'
 import { auditRequest } from './audit.js'
 import { GroupError, managesGroup } from './groups.js'
-import { validateIncomeSavings, resolveEntryTime } from './ledger-protocol.js'
+import { validateIncomeSavings, resolveEntryTime, canEditLedgerEntry } from './ledger-protocol.js'
 
 const source = await readFile(new URL('./index.js', import.meta.url), 'utf8')
 const routes = source.slice(source.indexOf('function validateExpenseInput('), source.indexOf('app.use((error, _request'))
@@ -42,7 +42,7 @@ function setup({ duplicate = false, failInsert = 0, savings = 0, record, role = 
       throw new Error(`Unexpected query: ${sql}`)
     },
   }
-  const context = vm.createContext({ GroupError, managesGroup, auditRequest, validateIncomeSavings, resolveEntryTime, ledgerTimeNow: () => '2026-11-26 16:42',
+  const context = vm.createContext({ GroupError, managesGroup, auditRequest, validateIncomeSavings, resolveEntryTime, canEditLedgerEntry, ledgerTimeNow: () => '2026-11-26 16:42',
     categories: new Set(['餐饮']), incomeCategories: new Set(['工资']), datePattern: /^\d{4}-\d{2}-\d{2}$/,
     app: { post(path, ...callbacks) { handlers.post = callbacks.at(-1) }, patch(path, ...callbacks) { handlers.patch = callbacks.at(-1) }, delete(path, ...callbacks) { handlers.delete = callbacks.at(-1) } },
     requireAuth() {}, requireGroupMember() {}, hasCurrentQqGroupBinding: async () => bindingValid,
@@ -163,4 +163,13 @@ test('edit validates savings delta, missing records, duplicates and historical t
   await historical.patch({ note: '修改备注' })
   assert.equal(historical.response.data.expense.time, null)
   assert.equal(historical.response.data.expense.note, '修改备注')
+})
+
+
+test('entry edit policy accepts own ids and grants only managers access to other members', () => {
+  for (const payerId of [3, '3']) assert.equal(canEditLedgerEntry({ payerId }, 3, 'member'), true)
+  assert.equal(canEditLedgerEntry({ payerId: 4 }, 3, 'member'), false)
+  assert.equal(canEditLedgerEntry({ payerId: null }, 3, 'member'), false)
+  for (const role of ['admin', 'owner']) assert.equal(canEditLedgerEntry({ payerId: 4 }, 3, role), true)
+  assert.equal(canEditLedgerEntry({ payerId: null }, null, 'member'), false)
 })

@@ -34,7 +34,7 @@ import LedgerColumnFilter from './LedgerColumnFilter.jsx'
 import LedgerCalendar from './LedgerCalendar.jsx'
 import { filterLedger, ledgerMemberOptions } from './ledgerFilters.js'
 import { describeDuplicate, saveExpense, updateExpense } from './expenseApi.js'
-import { entryLabel, entrySign, transferDirections, incomeAllocationLabel, ledgerTimeNow } from '../server/ledger-protocol.js'
+import { entryLabel, entrySign, transferDirections, incomeAllocationLabel, ledgerTimeNow, canEditLedgerEntry } from '../server/ledger-protocol.js'
 import './styles.css'
 
 const categoryMeta = {
@@ -140,14 +140,16 @@ function App() {
   const today = localDate(new Date())
   const month = allMonths ? 'all' : selectedMonth
   const activeGroup = groups.find((group) => group.id === activeGroupId) || null
-  const members = groupInfo?.members || []
-  const canManageRecords = ['owner', 'admin'].includes(groupInfo?.role || activeGroup?.role)
+  const currentGroupInfo = groupInfo?.id === activeGroupId ? groupInfo : null
+  const members = currentGroupInfo?.members || []
+  const currentRole = activeGroup?.role || currentGroupInfo?.role
+  const canManageRecords = ['owner', 'admin'].includes(currentRole)
   const canViewActivity = activeGroup?.role === 'owner' && (!groupInfo || groupInfo.id !== activeGroupId || groupInfo.role === 'owner')
 
   useEffect(() => {
     if (activePage === 'activity' && !canViewActivity) setActivePage('ledger')
   }, [activePage, canViewActivity])
-  const canEditTransaction = (item) => canManageRecords || item.payerId === user?.id
+  const canEditTransaction = (item) => canEditLedgerEntry(item, user?.id, currentRole)
   const filterCategories = typeFilter === 'income'
     ? incomeCategories
     : typeFilter === 'transfer' ? ['存款'] : typeFilter === 'expense'
@@ -430,8 +432,8 @@ function App() {
             <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="按商品名筛选" aria-label="按商品名筛选" /></label>
           </div>
           <div className="transactions-list">
-            <div className="transaction-header"><span>日期</span><span className="transaction-header-icon" /><LedgerColumnFilter key={`category:${activeGroupId}:${typeFilter}`} label="分类" options={filterCategories.map((category) => ({ value: category, label: category }))} selected={selectedCategories} onChange={setSelectedCategories} /><span>商品</span><span>商家</span><LedgerColumnFilter key={`member:${activeGroupId}`} label="成员" options={memberOptions} selected={selectedMembers} onChange={setSelectedMembers} align="right" /><span className="transaction-header-amount">金额</span><span /></div>
-            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>调整分类、成员或商品名筛选试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
+            <div className="transaction-header"><span>日期</span><span className="transaction-header-icon" /><LedgerColumnFilter key={`category:${activeGroupId}:${typeFilter}`} label="分类" options={filterCategories.map((category) => ({ value: category, label: category }))} selected={selectedCategories} onChange={setSelectedCategories} /><span>商品</span><span>商家</span><LedgerColumnFilter key={`member:${activeGroupId}`} label="成员" options={memberOptions} selected={selectedMembers} onChange={setSelectedMembers} align="right" /><span className="transaction-header-amount">金额</span><span>操作</span></div>
+            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} onEdit={openTransactionForm} canEdit={canEditTransaction(item)} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>调整分类、成员或商品名筛选试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
           </div>
           <button className="load-more" onClick={() => openTransactionForm()}><Plus size={16} />添加一笔新账单</button>
         </section>
@@ -469,7 +471,7 @@ function App() {
   )
 }
 
-function TransactionRow({ item, today, onDelete, onOpen }) {
+function TransactionRow({ item, today, onDelete, onOpen, onEdit, canEdit }) {
   const isIncome = item.type === 'income'
   const isTransfer = item.type === 'transfer'
   const meta = isTransfer ? savingsMeta : (isIncome ? incomeCategoryMeta : categoryMeta)[item.category] || categoryMeta['餐饮']
@@ -479,7 +481,7 @@ function TransactionRow({ item, today, onDelete, onOpen }) {
   const initials = item.payer?.slice(0, 1) || '?'
   const title = isTransfer ? entryLabel(item) : item.productName || '-'
   const merchant = item.merchant && item.merchant !== item.category ? item.merchant : '-'
-  return <div className={`transaction-row ${isIncome ? 'income-row' : ''}`}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}{item.time ? ` ${item.time}` : ''}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-merchant" title={item.category}><strong>{item.category}</strong></div><button type="button" className="transaction-copy transaction-open" onClick={() => onOpen(item)} aria-label={`查看${item.productName || item.category}账单详情`} title={isIncome ? `${title} · ${incomeAllocationLabel(item)}` : title}><strong>{title}</strong>{isIncome && Number(item.savingsAmount) > 0 && <span className="income-allocation"><LockKeyhole size={10} />存款 ¥{formatMoney(item.savingsAmount)}</span>}</button><div className="transaction-merchant" title={merchant}><strong>{merchant}</strong></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isTransfer ? 'transaction-amount savings' : isIncome ? 'transaction-amount income' : 'transaction-amount'}>{entrySign(item)} ¥{formatMoney(item.amount)}</strong><button className="row-more" aria-label={`${item.productName || item.category}删除账单`} onClick={() => onDelete(item.id)} title="删除账单"><Trash2 size={16} /></button></div>
+  return <div className={`transaction-row ${isIncome ? 'income-row' : ''}`}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}{item.time ? ` ${item.time}` : ''}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-merchant" title={item.category}><strong>{item.category}</strong></div><button type="button" className="transaction-copy transaction-open" onClick={() => onOpen(item)} aria-label={`查看${item.productName || item.category}账单详情`} title={isIncome ? `${title} · ${incomeAllocationLabel(item)}` : title}><strong>{title}</strong>{isIncome && Number(item.savingsAmount) > 0 && <span className="income-allocation"><LockKeyhole size={10} />存款 ¥{formatMoney(item.savingsAmount)}</span>}</button><div className="transaction-merchant" title={merchant}><strong>{merchant}</strong></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isTransfer ? 'transaction-amount savings' : isIncome ? 'transaction-amount income' : 'transaction-amount'}>{entrySign(item)} ¥{formatMoney(item.amount)}</strong><div className="transaction-actions">{canEdit && <button type="button" className="row-edit" aria-label={`编辑${item.productName || item.category}账单`} onClick={() => onEdit(item)} title="编辑账单"><Pencil size={15} /><span>编辑</span></button>}<button type="button" className="row-more" aria-label={`${item.productName || item.category}删除账单`} onClick={() => onDelete(item.id)} title="删除账单"><Trash2 size={15} /><span>删除</span></button></div></div>
 }
 
 function monthEnd(month) {

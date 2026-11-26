@@ -12,7 +12,7 @@ import { ensureTaskSchema, registerTaskRoutes, startTaskWorker } from './tasks.j
 import { sendTaskNotification } from './qq-api.js'
 import { getAccountBalances } from './ledger.js'
 import { ensureAuditSchema, auditMiddleware, auditRequest, registerAuditRoutes } from './audit.js'
-import { validateIncomeSavings, ledgerTimeNow, resolveEntryTime } from './ledger-protocol.js'
+import { validateIncomeSavings, ledgerTimeNow, resolveEntryTime, canEditLedgerEntry } from './ledger-protocol.js'
 
 const app = express()
 const port = Number(process.env.API_PORT || 3001)
@@ -805,7 +805,7 @@ app.patch('/api/groups/:groupId/expenses/:id', requireAuth, requireGroupMember, 
       FROM expenses e WHERE e.id=? AND e.group_id=?`, [id, request.group.id])
     if (!record) throw new GroupError(404, '账单不存在。')
     const manager = managesGroup(member.role)
-    if (!manager && record.payer_user_id !== request.user.id) throw new GroupError(403, '只能编辑自己名下的账单。')
+    if (!canEditLedgerEntry({ payerId: record.payer_user_id }, request.user.id, member.role)) throw new GroupError(403, '只能编辑自己名下的账单。')
     const input = { ...serializeExpense(record), ...request.body }
     const entry = validateExpenseInput(input, request, ledgerTimeNow().slice(11))
     if (!manager && entry.payerUserId !== request.user.id) throw new GroupError(403, '普通成员不能修改账单归属。')
