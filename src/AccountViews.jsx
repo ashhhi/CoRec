@@ -439,7 +439,7 @@ export function GroupEntryDialog({ mode, groups, onChanged, onClose }) {
   </div>
 }
 
-export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, fullScreen = false }) {
+export function GroupPanel({ user, groups, activeGroup, onChanged, onLedgerReset, onClose, fullScreen = false }) {
   const [members, setMembers] = useState([])
   const [membersError, setMembersError] = useState('')
   const [inviteCode, setInviteCode] = useState(activeGroup?.inviteCode || '')
@@ -454,8 +454,8 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
   const [successorId, setSuccessorId] = useState('')
   const [nameDraft, setNameDraft] = useState(activeGroup?.name || '')
   const nameEdited = useRef(false)
-  const latest = useRef({ onChanged })
-  latest.current = { onChanged }
+  const latest = useRef({ onChanged, onLedgerReset })
+  latest.current = { onChanged, onLedgerReset }
   const canManage = role === 'owner' || role === 'admin'
 
   useEffect(() => {
@@ -534,6 +534,21 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
     }
   }
 
+  async function resetLedger() {
+    const confirmation = window.prompt(`重置「${activeGroup.name}」的全部账单？\n将永久删除所有成员、所有月份的收入和支出记录，无法恢复。\n请输入群组名称「${activeGroup.name}」确认：`)
+    if (confirmation === null) return
+    if (confirmation !== activeGroup.name) { setError('群组名称不匹配，未重置账单。'); return }
+    setBusy(true)
+    setError('')
+    setNotice('')
+    const groupId = activeGroup.id
+    try {
+      const result = await requestJson(`/api/groups/${groupId}/ledger/reset`, { method: 'POST', body: JSON.stringify({ confirmation }) })
+      latest.current.onLedgerReset?.(groupId)
+      setNotice(`账单已重置，共删除 ${result.deletedCount} 条记录。`)
+    } catch (requestError) { setError(requestError.message) } finally { setBusy(false) }
+  }
+
   async function invite(event) {
     event.preventDefault()
     await manage('/invitations', { body: { username: inviteUsername }, success: '邀请已发送，对方接受后即可加入。' })
@@ -602,6 +617,11 @@ export function GroupPanel({ user, groups, activeGroup, onChanged, onClose, full
     {activeGroup && <GroupAccessInbox groups={groups} onChanged={onChanged} revision={revision} />}
     {notice && <div className="success-banner" role="status">{notice}</div>}
     {error && <div className="error-banner" role="alert">{error}</div>}
+    {activeGroup && role === 'owner' && <section className="group-lifecycle" aria-label="账单重置">
+      <h3>重置账单</h3>
+      <p className="group-help">永久删除本群组所有月份、所有成员的收入和支出记录，无法恢复。</p>
+      <button type="button" className="group-danger-button" disabled={busy} onClick={resetLedger}>重置全部账单</button>
+    </section>}
     {activeGroup && <section className="group-lifecycle" aria-label="退出与群主管理">
       {role === 'owner' ? <>
         <h3>转让群主</h3>

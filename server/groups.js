@@ -94,6 +94,15 @@ export function registerGroupRoutes(app, { pool, requireAuth, invitePattern, use
     return run(connection, group, role)
   })
 
+  app.post('/api/groups/:groupId/ledger/reset', requireAuth, async (request, response) => {
+    const deletedCount = await withGroup(request, ['owner'], async (connection, group) => {
+      if (request.body?.confirmation !== group.name) throw new GroupError(400, '请输入正确的群组名称以确认重置账单。')
+      const [result] = await connection.execute('DELETE FROM expenses WHERE group_id = ?', [group.id])
+      return result.affectedRows
+    })
+    response.json({ ok: true, deletedCount })
+  })
+
   app.patch('/api/groups/:groupId', requireAuth, async (request, response) => {
     const name = typeof request.body?.name === 'string' ? request.body.name.trim() : ''
     if (!name || name.length > 80) throw new GroupError(400, '群组名称需为 1 到 80 个字符。')

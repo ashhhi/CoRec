@@ -87,6 +87,7 @@ function App() {
   const [allMonths, setAllMonths] = useState(false)
   const [transactions, setTransactions] = useState([])
   const [groupBalance, setGroupBalance] = useState(0)
+  const [ledgerRevision, setLedgerRevision] = useState(0)
   const [typeFilter, setTypeFilter] = useState('all')
   const [selectedCategories, setSelectedCategories] = useState(null)
   const [selectedMembers, setSelectedMembers] = useState(null)
@@ -312,6 +313,20 @@ function App() {
     document.getElementById('group-add-trigger')?.focus()
   }
 
+  function handleLedgerReset(groupId) {
+    if (groupId !== activeGroupId) return
+    ++ledgerRequest.current
+    setTransactions([])
+    setGroupBalance(0)
+    setLoading(false)
+    setSelectedTransaction(null)
+    setSelectedCategories(null)
+    setSelectedMembers(null)
+    setSearch('')
+    setError('')
+    setLedgerRevision((value) => value + 1)
+  }
+
   if (authLoading) return <main className="account-page"><div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div><div className="account-loading">正在连接 CoRec…</div></main>
   if (!user) return <AuthScreen onAuthenticated={async () => { await loadProfile() }} />
   if (!groups.length) return <GroupPanel user={user} groups={groups} activeGroup={null} onChanged={async (group) => { await loadProfile(group?.id) }} fullScreen />
@@ -369,7 +384,7 @@ function App() {
           <button className="load-more" onClick={() => setShowModal(true)}><Plus size={16} />添加一笔新账单</button>
         </section>
         {!allMonths && <LedgerCalendar key={`${activeGroupId}:${selectedMonth}`} month={selectedMonth} transactions={transactions} today={today} loading={loading} />}
-        <LedgerCharts groupId={activeGroupId} month={month} />
+        <LedgerCharts groupId={activeGroupId} month={month} refreshKey={ledgerRevision} />
         </> : activePage === 'tasks' ? <TasksPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} role={activeGroup?.role} /> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={() => loadLedger(month)} />}
       </main>
 
@@ -392,7 +407,7 @@ function App() {
           <button className="primary-button modal-submit" type="submit" disabled={saving || !members.length}><Plus size={18} />{saving ? '保存中…' : entryType === 'income' ? '保存这笔收入' : '保存这笔支出'}</button>
         </form>
       </div>}
-      {showGroupPanel && <GroupPanel user={user} groups={groups} activeGroup={activeGroup} onChanged={async (group) => { await loadProfile(group?.id) }} onClose={() => setShowGroupPanel(false)} />}
+      {showGroupPanel && <GroupPanel user={user} groups={groups} activeGroup={activeGroup} onChanged={async (group) => { await loadProfile(group?.id) }} onLedgerReset={handleLedgerReset} onClose={() => setShowGroupPanel(false)} />}
       {groupEntryMode && <GroupEntryDialog key={groupEntryMode} mode={groupEntryMode} groups={groups} onChanged={async (group) => { await loadProfile(group?.id) }} onClose={closeGroupEntry} />}
       {showProfilePanel && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setShowProfilePanel(false)}><section className="group-panel profile-modal"><div className="group-panel-heading"><div className="account-icon"><UserRound size={20} /></div><div><p className="eyebrow">PERSONAL PROFILE</p><h2>修改个人名字</h2><p>这个名字会显示在群组成员和账单中。</p></div><button className="close-button" onClick={() => setShowProfilePanel(false)} aria-label="关闭"><X size={19} /></button></div><form className="account-form profile-form" onSubmit={updateDisplayName}><label><span>名字</span><input value={profileName} onChange={(event) => setProfileName(event.target.value)} minLength="1" maxLength="32" autoComplete="name" required /></label>{profileError && <div className="error-banner" role="alert">{profileError}</div>}<button className="primary-button account-submit" type="submit" disabled={profileSaving}>{profileSaving ? '保存中…' : '保存名字'}</button></form></section></div>}
     </div>
@@ -526,7 +541,7 @@ function TrendChart({ timeline, from, to, granularity }) {
   </div>
 }
 
-function LedgerCharts({ groupId, month }) {
+function LedgerCharts({ groupId, month, refreshKey }) {
   const allMonths = month === 'all'
   const [from, setFrom] = useState(allMonths ? '2000-01-01' : `${month}-01`)
   const [to, setTo] = useState(allMonths ? localDate(new Date()) : monthEnd(month))
@@ -560,7 +575,7 @@ function LedgerCharts({ groupId, month }) {
       if (current) setLoading(false)
     })
     return () => { current = false }
-  }, [groupId, from, to, granularity, rangeValid])
+  }, [groupId, from, to, granularity, rangeValid, refreshKey])
 
   const categories = analytics.categories || []
   const totalExpense = categories.reduce((sum, item) => sum + Number(item.amount), 0)
