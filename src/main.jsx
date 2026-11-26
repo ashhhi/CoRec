@@ -105,6 +105,17 @@ function App() {
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
   const ledgerRequest = useRef(0)
+  const topbarRef = useRef(null)
+
+  useEffect(() => {
+    const header = topbarRef.current
+    if (!header) return
+    const updateHeight = () => header.parentElement?.style.setProperty('--topbar-height', `${header.getBoundingClientRect().height}px`)
+    updateHeight()
+    const observer = new ResizeObserver(updateHeight)
+    observer.observe(header)
+    return () => observer.disconnect()
+  }, [user?.id, groups.length > 0])
 
   const today = localDate(new Date())
   const month = allMonths ? 'all' : selectedMonth
@@ -308,7 +319,7 @@ function App() {
   return (
     <div className="app-shell">
       <main className="main-content">
-        <header className="topbar">
+        <header ref={topbarRef} className="topbar">
           <div className="brand"><span className="brand-mark">co</span><span>CoRec</span></div>
           <nav className="main-tabs" aria-label="主页面"><button className={activePage === 'ledger' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('ledger')}><BookOpen size={16} />账本</button><button className={activePage === 'tasks' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('tasks')}><CheckSquare size={16} />任务</button><button className={activePage === 'chat' ? 'main-tab active' : 'main-tab'} onClick={() => setActivePage('chat')}><MessageSquare size={16} />Chat</button></nav>
           <div className="account-actions">

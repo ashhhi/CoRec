@@ -8,7 +8,8 @@ button { border: 0; cursor: pointer; }
 .app-shell { min-height: 100vh; }
 .main-content { width: min(100%, 1120px); margin: 0 auto; padding: 0 42px 56px; }
 .topbar { height: 77px; display: flex; align-items: center; border-bottom: 1px solid #e8e5dd; }
-.main-content > .month-toolbar { margin-top: 24px; }
+.main-content > .month-toolbar { position: sticky; top: var(--topbar-height,77px); z-index: 4; min-height: 58px; margin-top: 10px; padding: 14px 0; background: #f5f4ef; }
+.main-content > .month-toolbar::before { content: ''; position: absolute; z-index: -1; inset: 0 -42px; background: #f5f4ef; border-bottom: 1px solid #e8e5dd; box-shadow: 0 4px 8px rgba(38,53,62,.03); }
 .main-content > .topbar { position: sticky; top: 0; z-index: 5; background: #f5f4ef; }
 .main-content > .topbar::before { content: ''; position: absolute; z-index: -1; inset: 0 -42px; background: #f5f4ef; border-bottom: 1px solid #e8e5dd; }
 .brand { display: flex; align-items: center; gap: 9px; color: #202c36; font-weight: 800; font-size: 20px; }
@@ -363,7 +364,7 @@ button { border: 0; cursor: pointer; }
   .main-content > .topbar { height: auto; min-height: 62px; flex-wrap: wrap; gap: 8px; padding: 9px 0; }
   .main-content > .topbar .main-tabs { order: 3; flex: 0 0 100%; justify-content: center; margin: 0; padding: 3px; }
   .main-content > .topbar .account-actions { margin-left: auto; }
-  .main-content > .topbar::before { right: -16px; left: -16px; }
+  .main-content > .topbar::before, .main-content > .month-toolbar::before { right: -16px; left: -16px; }
   .transaction-row, .transaction-header { grid-template-columns: 48px 38px minmax(0, 1fr) minmax(0, 1fr) 40px 68px 27px; gap: 4px; }
   .ledger-controls .ledger-filter-group { margin-bottom: 10px; }
   .ledger-controls .filter-tabs { margin-bottom: 0; }
@@ -391,7 +392,7 @@ button { border: 0; cursor: pointer; }
 }
 
 @media (max-width: 380px) {
-  .main-content > .topbar::before { right: -12px; left: -12px; }
+  .main-content > .topbar::before, .main-content > .month-toolbar::before { right: -12px; left: -12px; }
   .transaction-row, .transaction-header { grid-template-columns: 43px 36px minmax(0, 1fr) minmax(0, 1fr) 36px 62px 24px; gap: 3px; }
   .balance-primary > strong { font-size: 19px; }
   .balance-stat > strong { font-size: 12px; }
