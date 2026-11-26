@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { History, RefreshCw } from 'lucide-react'
+import Pagination from './Pagination.jsx'
 
 const categories = { ledger: '账单', group: '群组', task: '任务', binding: 'QQ 绑定', account: '账号', chat: 'Chat', view: '页面访问' }
 const sources = { web: '网页', chat: 'Chat', 'qq-group': 'QQ 群', 'qq-private': 'QQ 私聊', system: '系统' }
@@ -40,14 +41,15 @@ export default function ActivityPage({ groupId, groupName, members }) {
   const [filters, setFilters] = useState({ scope:'group', actor:'', category:'', from:'', to:'' })
   const [items, setItems] = useState([])
   const [actors, setActors] = useState([])
-  const [cursor, setCursor] = useState(null)
+  const [pagination, setPagination] = useState({page:1,pageSize:20})
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [revision, setRevision] = useState(0)
   const requestVersion = useRef(0)
   const controller = useRef(null)
 
-  async function load(before = null) {
+  async function load() {
     controller.current?.abort()
     const currentController = new AbortController()
     controller.current = currentController
@@ -55,27 +57,32 @@ export default function ActivityPage({ groupId, groupName, members }) {
     setLoading(true)
     setError('')
     const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value))
-    if (before) query.set('before', before)
+    query.set('page', pagination.page)
+    query.set('pageSize', pagination.pageSize)
     try {
       const response = await fetch(`/api/groups/${groupId}/activity?${query}`, { signal: currentController.signal })
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || '读取操作记录失败。')
       if (version !== requestVersion.current) return
-      setItems((previous) => before ? [...previous, ...data.items] : data.items)
+      setItems(data.items)
       setActors(data.actors)
-      setCursor(data.nextCursor)
+      setTotal(data.total)
+      if (data.page !== pagination.page) setPagination((previous) => ({...previous,page:data.page}))
     } catch (error) {
       if (version === requestVersion.current && error.name !== 'AbortError') setError(error.message)
     } finally { if (version === requestVersion.current) setLoading(false) }
   }
 
   useEffect(() => {
-    setItems([]); setCursor(null)
+    setItems([])
     load()
     return () => { ++requestVersion.current; controller.current?.abort() }
-  }, [groupId, filters, revision])
+  }, [groupId, filters, revision, pagination])
 
-  const setFilter = (key, value) => setFilters((previous) => ({ ...previous, [key]:value, ...(key === 'scope' ? { actor:'' } : {}) }))
+  const setFilter = (key, value) => {
+    setPagination((previous) => ({...previous,page:1}))
+    setFilters((previous) => ({ ...previous, [key]:value, ...(key === 'scope' ? { actor:'' } : {}) }))
+  }
   return <section className="activity-page">
     <header className="page-heading"><div><p className="eyebrow">ACTIVITY HISTORY</p><h1><History size={25} />操作记录</h1><p className="heading-note">{groupName} · 操作时间统一为香港时间</p></div><button type="button" className="icon-button" title="刷新操作记录" aria-label="刷新操作记录" disabled={loading} onClick={() => setRevision((value) => value + 1)}><RefreshCw size={18} /></button></header>
     <div className="panel">
@@ -98,7 +105,7 @@ export default function ActivityPage({ groupId, groupName, members }) {
         {!items.length && !loading && !error && <div className="empty-state">暂无符合条件的操作记录</div>}
         {loading && <p className="activity-loading" role="status">正在加载…</p>}
       </div>
-      {cursor && <button type="button" className="load-more" disabled={loading} onClick={() => load(cursor)}>加载更早的操作</button>}
+      <Pagination label="操作记录" page={pagination.page} pageSize={pagination.pageSize} total={total} disabled={loading} onPageChange={(page) => setPagination((previous) => ({...previous,page}))} onPageSizeChange={(pageSize) => setPagination({page:1,pageSize})} />
     </div>
   </section>
 }

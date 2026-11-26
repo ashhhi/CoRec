@@ -30,6 +30,7 @@ import { AuthScreen, GroupAddMenu, GroupEntryDialog, GroupPanel } from './Accoun
 import ChatPage from './ChatPage.jsx'
 import TasksPage from './TasksPage.jsx'
 import ActivityPage from './ActivityPage.jsx'
+import Pagination from './Pagination.jsx'
 import LedgerColumnFilter from './LedgerColumnFilter.jsx'
 import LedgerCalendar from './LedgerCalendar.jsx'
 import { filterLedger, ledgerMemberOptions } from './ledgerFilters.js'
@@ -99,6 +100,8 @@ function App() {
   const [selectedCategories, setSelectedCategories] = useState(null)
   const [selectedMembers, setSelectedMembers] = useState(null)
   const [search, setSearch] = useState('')
+  const [ledgerPage, setLedgerPage] = useState(1)
+  const [ledgerPageSize, setLedgerPageSize] = useState(20)
   const [showModal, setShowModal] = useState(false)
   const [selectedTransaction, setSelectedTransaction] = useState(null)
   const [editingTransaction, setEditingTransaction] = useState(null)
@@ -158,6 +161,11 @@ function App() {
   const monthLabel = new Date(`${selectedMonth}-01T12:00:00`).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long' })
   const memberOptions = ledgerMemberOptions(members, transactions)
   const visibleTransactions = filterLedger(transactions, { type: typeFilter, categories: selectedCategories, members: selectedMembers, search })
+  const ledgerPageCount = Math.max(1, Math.ceil(visibleTransactions.length / ledgerPageSize))
+  const currentLedgerPage = Math.min(ledgerPage, ledgerPageCount)
+  const pagedTransactions = visibleTransactions.slice((currentLedgerPage - 1) * ledgerPageSize, currentLedgerPage * ledgerPageSize)
+  useEffect(() => { setLedgerPage(1) }, [activeGroupId, month, typeFilter, selectedCategories, selectedMembers, search, ledgerPageSize])
+  useEffect(() => { setLedgerPage((page) => Math.min(page, ledgerPageCount)) }, [ledgerPageCount])
   const hasColumnFilters = selectedCategories !== null || selectedMembers !== null
   const monthIncome = transactions.reduce((total, item) => total + (item.type === 'income' ? Number(item.amount) : 0), 0)
   const monthExpense = transactions.reduce((total, item) => total + (item.type === 'expense' ? Number(item.amount) : 0), 0)
@@ -297,6 +305,7 @@ function App() {
     try {
       const response = await fetch(`/api/groups/${activeGroupId}/expenses/${id}`, { method: 'DELETE' })
       await readJson(response)
+      setSelectedTransaction(null)
       setLedgerRevision((value)=>value+1)
       await loadLedger(month)
     } catch (deleteError) {
@@ -432,17 +441,18 @@ function App() {
             <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="按商品名筛选" aria-label="按商品名筛选" /></label>
           </div>
           <div className="transactions-list">
-            <div className="transaction-header"><span>日期</span><span className="transaction-header-icon" /><LedgerColumnFilter key={`category:${activeGroupId}:${typeFilter}`} label="分类" options={filterCategories.map((category) => ({ value: category, label: category }))} selected={selectedCategories} onChange={setSelectedCategories} /><span>商品</span><span>商家</span><LedgerColumnFilter key={`member:${activeGroupId}`} label="成员" options={memberOptions} selected={selectedMembers} onChange={setSelectedMembers} align="right" /><span className="transaction-header-amount">金额</span><span>操作</span></div>
-            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? visibleTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onDelete={deleteTransaction} onOpen={setSelectedTransaction} onEdit={openTransactionForm} canEdit={canEditTransaction(item)} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>调整分类、成员或商品名筛选试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
+            <div className="transaction-header"><span>日期</span><span className="transaction-header-icon" /><LedgerColumnFilter key={`category:${activeGroupId}:${typeFilter}`} label="分类" options={filterCategories.map((category) => ({ value: category, label: category }))} selected={selectedCategories} onChange={setSelectedCategories} /><span>商品</span><span>商家</span><LedgerColumnFilter key={`member:${activeGroupId}`} label="成员" options={memberOptions} selected={selectedMembers} onChange={setSelectedMembers} align="right" /><span className="transaction-header-amount">金额</span></div>
+            {loading ? <div className="empty-state">正在加载账本…</div> : visibleTransactions.length ? pagedTransactions.map((item) => <TransactionRow key={item.id} item={item} today={today} onOpen={(item) => { setError(''); setSelectedTransaction(item) }} />) : <div className="empty-state">{transactions.length ? <>没有找到相关账单<div>调整分类、成员或商品名筛选试试</div></> : <>{allMonths ? '还没有账单' : '这个月还没有账单'}<div>记下群组的第一笔共同支出</div></>}</div>}
           </div>
+          <Pagination label="账单" page={currentLedgerPage} pageSize={ledgerPageSize} total={visibleTransactions.length} disabled={loading} onPageChange={setLedgerPage} onPageSizeChange={(size) => { setLedgerPageSize(size); setLedgerPage(1) }} />
           <button className="load-more" onClick={() => openTransactionForm()}><Plus size={16} />添加一笔新账单</button>
         </section>
-        {!allMonths && <LedgerCalendar key={`${activeGroupId}:${selectedMonth}`} month={selectedMonth} transactions={transactions} today={today} loading={loading} onEdit={openTransactionForm} canEdit={canEditTransaction} />}
+        {!allMonths && <LedgerCalendar key={`${activeGroupId}:${selectedMonth}`} month={selectedMonth} transactions={transactions} today={today} loading={loading} onOpen={(item) => { setError(''); setSelectedTransaction(item) }} />}
         <LedgerCharts groupId={activeGroupId} month={month} refreshKey={ledgerRevision} />
         </> : activePage === 'tasks' ? <TasksPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} role={activeGroup?.role} /> : activePage === 'activity' && canViewActivity ? <ActivityPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} /> : <ChatPage key={activeGroupId} groupId={activeGroupId} groupName={activeGroup?.name || ''} members={members} user={user} onExpenseSaved={async () => { setLedgerRevision((value)=>value+1); await loadLedger(month) }} />}
       </main>
 
-      {selectedTransaction && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTransaction(null)}><section className="expense-modal transaction-detail" role="dialog" aria-modal="true" aria-labelledby="transaction-detail-title"><div className="modal-head"><h2 id="transaction-detail-title">账单详情</h2><button type="button" className="close-button" onClick={() => setSelectedTransaction(null)} aria-label="关闭"><X size={19} /></button></div><dl>{[['类型', entryLabel(selectedTransaction)], ['金额', `¥${formatMoney(selectedTransaction.amount)}`], ['分类', selectedTransaction.category], ...(selectedTransaction.type === 'income' ? [['收入分配', incomeAllocationLabel(selectedTransaction)]] : []), ...(selectedTransaction.type === 'transfer' ? [['转账方向', entryLabel(selectedTransaction)]] : []), ['商品名', selectedTransaction.productName || '未填写'], ['商家', selectedTransaction.merchant && selectedTransaction.merchant !== selectedTransaction.category ? selectedTransaction.merchant : '未填写'], ['日期', selectedTransaction.date], ['时间', selectedTransaction.time || '未记录'], [selectedTransaction.type === 'transfer' ? '经办成员' : selectedTransaction.type === 'income' ? '收入归属' : '付款人', selectedTransaction.payer], ['备注', selectedTransaction.note || '无']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{canEditTransaction(selectedTransaction) && <button type="button" className="primary-button modal-submit" onClick={() => openTransactionForm(selectedTransaction)}><Pencil size={16} />编辑账单</button>}</section></div>}
+      {selectedTransaction && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelectedTransaction(null)}><section className="expense-modal transaction-detail" role="dialog" aria-modal="true" aria-labelledby="transaction-detail-title"><div className="modal-head"><h2 id="transaction-detail-title">账单详情</h2><button type="button" className="close-button" onClick={() => setSelectedTransaction(null)} aria-label="关闭"><X size={19} /></button></div><dl>{[['类型', entryLabel(selectedTransaction)], ['金额', `¥${formatMoney(selectedTransaction.amount)}`], ['分类', selectedTransaction.category], ...(selectedTransaction.type === 'income' ? [['收入分配', incomeAllocationLabel(selectedTransaction)]] : []), ...(selectedTransaction.type === 'transfer' ? [['转账方向', entryLabel(selectedTransaction)]] : []), ['商品名', selectedTransaction.productName || '未填写'], ['商家', selectedTransaction.merchant && selectedTransaction.merchant !== selectedTransaction.category ? selectedTransaction.merchant : '未填写'], ['日期', selectedTransaction.date], ['时间', selectedTransaction.time || '未记录'], [selectedTransaction.type === 'transfer' ? '经办成员' : selectedTransaction.type === 'income' ? '收入归属' : '付款人', selectedTransaction.payer], ['备注', selectedTransaction.note || '无']].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>{error && <div className="error-banner" role="alert">{error}</div>}<div className="transaction-detail-actions">{canEditTransaction(selectedTransaction) && <button type="button" className="primary-button" onClick={() => openTransactionForm(selectedTransaction)}><Pencil size={16} />编辑账单</button>}<button type="button" className="delete-transaction" onClick={() => deleteTransaction(selectedTransaction.id)}><Trash2 size={16} />删除账单</button></div></section></div>}
 
       {showModal && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !saving && setShowModal(false)}>
         <form key={editingTransaction?.id || 'new'} role="dialog" aria-modal="true" aria-labelledby="entry-form-title" className={`expense-modal ${entryType === 'income' ? 'income-entry' : ''}`} onSubmit={addTransaction}>
@@ -471,7 +481,7 @@ function App() {
   )
 }
 
-function TransactionRow({ item, today, onDelete, onOpen, onEdit, canEdit }) {
+function TransactionRow({ item, today, onOpen }) {
   const isIncome = item.type === 'income'
   const isTransfer = item.type === 'transfer'
   const meta = isTransfer ? savingsMeta : (isIncome ? incomeCategoryMeta : categoryMeta)[item.category] || categoryMeta['餐饮']
@@ -481,7 +491,7 @@ function TransactionRow({ item, today, onDelete, onOpen, onEdit, canEdit }) {
   const initials = item.payer?.slice(0, 1) || '?'
   const title = isTransfer ? entryLabel(item) : item.productName || '-'
   const merchant = item.merchant && item.merchant !== item.category ? item.merchant : '-'
-  return <div className={`transaction-row ${isIncome ? 'income-row' : ''}`}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}{item.time ? ` ${item.time}` : ''}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-merchant" title={item.category}><strong>{item.category}</strong></div><button type="button" className="transaction-copy transaction-open" onClick={() => onOpen(item)} aria-label={`查看${item.productName || item.category}账单详情`} title={isIncome ? `${title} · ${incomeAllocationLabel(item)}` : title}><strong>{title}</strong>{isIncome && Number(item.savingsAmount) > 0 && <span className="income-allocation"><LockKeyhole size={10} />存款 ¥{formatMoney(item.savingsAmount)}</span>}</button><div className="transaction-merchant" title={merchant}><strong>{merchant}</strong></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isTransfer ? 'transaction-amount savings' : isIncome ? 'transaction-amount income' : 'transaction-amount'}>{entrySign(item)} ¥{formatMoney(item.amount)}</strong><div className="transaction-actions">{canEdit && <button type="button" className="row-edit" aria-label={`编辑${item.productName || item.category}账单`} onClick={() => onEdit(item)} title="编辑账单"><Pencil size={15} /><span>编辑</span></button>}<button type="button" className="row-more" aria-label={`${item.productName || item.category}删除账单`} onClick={() => onDelete(item.id)} title="删除账单"><Trash2 size={15} /><span>删除</span></button></div></div>
+  return <div className={`transaction-row transaction-row-open ${isIncome ? 'income-row' : ''}`} role="button" tabIndex={0} aria-haspopup="dialog" aria-label={`查看${item.productName || item.category}账单详情`} onClick={() => onOpen(item)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onOpen(item) } }}><div className="date-block"><strong>{date.date}</strong><span>{date.weekday}{item.time ? ` ${item.time}` : ''}</span></div><div className="transaction-icon" style={{ background: meta.soft, color: meta.color }}><Icon size={19} /></div><div className="transaction-merchant" title={item.category}><strong>{item.category}</strong></div><div className="transaction-copy" title={isIncome ? `${title} · ${incomeAllocationLabel(item)}` : title}><strong>{title}</strong>{isIncome && Number(item.savingsAmount) > 0 && <span className="income-allocation"><LockKeyhole size={10} />存款 ¥{formatMoney(item.savingsAmount)}</span>}</div><div className="transaction-merchant" title={merchant}><strong>{merchant}</strong></div><div className="transaction-payer"><span className={`avatar avatar-${avatar}`}>{initials}</span><span>{item.payer}</span></div><strong className={isTransfer ? 'transaction-amount savings' : isIncome ? 'transaction-amount income' : 'transaction-amount'}>{entrySign(item)} ¥{formatMoney(item.amount)}</strong></div>
 }
 
 function monthEnd(month) {

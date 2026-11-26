@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { CalendarDays, Pencil, X } from 'lucide-react'
+import { CalendarDays, X } from 'lucide-react'
 import { entryLabel, entrySign, incomeAllocationLabel } from '../server/ledger-protocol.js'
 
 const weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 const money = (cents) => (Math.abs(cents) / 100).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-function DayRecordsDialog({ date, transactions, onClose, onEdit, canEdit }) {
+function DayRecordsDialog({ date, transactions, onClose, onOpen }) {
   const headingId = useId()
   const dialog = useRef(null)
   const close = useRef(null)
@@ -41,14 +41,14 @@ function DayRecordsDialog({ date, transactions, onClose, onEdit, canEdit }) {
           <h3>{item.type==='transfer' ? entryLabel(item) : item.productName || item.merchant || item.category}</h3>
           {item.type === 'income' && <p className="income-allocation">{incomeAllocationLabel(item)}</p>}
           <dl><div><dt>商品</dt><dd>{item.productName || '未填写'}</dd></div><div><dt>商家</dt><dd>{item.merchant && item.merchant!==item.category ? item.merchant : '未填写'}</dd></div><div><dt>{item.type==='transfer' ? '经办成员' : item.type==='income' ? '收入归属' : '付款成员'}</dt><dd>{item.payer || '未记录'}</dd></div><div><dt>备注</dt><dd>{item.note || '无'}</dd></div></dl>
-          {onEdit && (!canEdit || canEdit(item)) && <button type="button" className="calendar-record-edit" onClick={() => { onClose(); onEdit(item) }}><Pencil size={13} />编辑账单</button>}
+          {onOpen && <button type="button" className="calendar-record-edit" onClick={() => { onClose(); onOpen(item) }}>查看详情</button>}
         </article>)}
       </div> : <div className="empty-state">这一天没有账单记录</div>}
     </section>
   </div>
 }
 
-export default function LedgerCalendar({ month, transactions, today, loading, onEdit, canEdit }) {
+export default function LedgerCalendar({ month, transactions, today, loading, onOpen }) {
   const headingId = useId()
   const [selectedDay,setSelectedDay]=useState(null)
   const closeDay=useCallback(()=>setSelectedDay(null),[])
@@ -97,6 +97,6 @@ export default function LedgerCalendar({ month, transactions, today, loading, on
         </tr>)}</tbody>
       </table>
     </div>
-    {selectedDay && <DayRecordsDialog date={selectedDay} transactions={transactions} onClose={closeDay} onEdit={onEdit} canEdit={canEdit} />}
+    {selectedDay && <DayRecordsDialog date={selectedDay} transactions={transactions} onClose={closeDay} onOpen={onOpen} />}
   </section>
 }

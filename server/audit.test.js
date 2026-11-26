@@ -53,14 +53,18 @@ test('history routes require authentication and group membership and paginate wi
   const pool={execute:async(sql,params)=>{
     assert.equal(params[0],7)
     if(sql.includes('GROUP BY'))return [[]]
-    return [Array.from({length:51},(_,i)=>({id:100-i,actor_name:'Ash',group_id:7,details:'{}',created_at:'2026-11-26T08:00:00.000Z'}))]
+    if(sql.includes('COUNT(*)'))return [[{total:51}]]
+    const limit = Number(/LIMIT (\d+)/.exec(sql)[1])
+    return [Array.from({length:limit},(_,i)=>({id:100-i,actor_name:'Ash',group_id:7,details:'{}',created_at:'2026-11-26T08:00:00.000Z'}))]
   }}
   registerAuditRoutes({get:(path,...handlers)=>{routes.get=handlers},post:(path,...handlers)=>{routes.post=handlers}},{pool,requireAuth,requireGroupMember})
   for(const handlers of Object.values(routes))assert.deepEqual(handlers.slice(0,2),[requireAuth,requireGroupMember])
   const response={set(){return this},json(data){this.data=data}}
   await routes.get.at(-1)({query:{},group:{id:7,role:'owner'},user:{id:3}},response)
-  assert.equal(response.data.items.length,50)
-  assert.equal(response.data.nextCursor,'51')
+  assert.equal(response.data.items.length,20)
+  assert.equal(response.data.total,51)
+  assert.equal(response.data.page,1)
+  assert.equal(response.data.pageSize,20)
 })
 
 
@@ -77,4 +81,29 @@ test('only the current owner can read history, including personal history', asyn
     }
   }
   assert.equal(queries, 0)
+})
+
+
+test('history pagination validates sizes, applies offsets and clamps empty/out-of-range pages', async () => {
+  let handler
+  const queries = []
+  const pool = {execute: async (sql, parameters) => {
+    queries.push({sql,parameters})
+    if (sql.includes('COUNT(*)')) return [[{total:23}]]
+    return [[]]
+  }}
+  registerAuditRoutes({get: (path,...handlers) => {handler=handlers.at(-1)},post(){}}, {pool,requireAuth(){},requireGroupMember(){}})
+  const response = {set(){return this},json(data){this.data=data}}
+  for (const pageSize of [5,10,20,50]) {
+    await handler({query:{page:'2',pageSize:String(pageSize)},group:{id:7,role:'owner'},user:{id:3}},response)
+    const expectedPage = Math.min(2,Math.ceil(23/pageSize))
+    assert.equal(response.data.page,expectedPage)
+    assert.equal(response.data.pageSize,pageSize)
+    assert.ok(queries.some(({sql}) => sql.includes(`LIMIT ${pageSize} OFFSET ${(expectedPage-1)*pageSize}`)))
+  }
+  for (const query of [{pageSize:'7'},{page:'0'},{page:'2.5'},{page:'NaN'}]) {
+    await assert.rejects(handler({query,group:{id:7,role:'owner'},user:{id:3}},response), (error) => error.status===400)
+  }
+  await handler({query:{page:'99',pageSize:'10'},group:{id:7,role:'owner'},user:{id:3}},response)
+  assert.equal(response.data.page,3)
 })

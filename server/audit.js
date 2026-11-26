@@ -120,16 +120,22 @@ export function auditQuery(query, groupId, userId) {
 export function registerAuditRoutes(app, { pool, requireAuth, requireGroupMember }) {
   app.get('/api/groups/:groupId/activity', requireAuth, requireGroupMember, async (request, response) => {
     if (request.group.role !== 'owner') throw new GroupError(403, '只有群组创建者可以查看操作记录。')
+    const pageSize = Number(request.query.pageSize || 20)
+    const requestedPage = Number(request.query.page || 1)
+    if (![5,10,20,50].includes(pageSize) || !Number.isSafeInteger(requestedPage) || requestedPage < 1) throw new GroupError(400, '分页参数无效。')
     const { conditions, parameters, mine } = auditQuery(request.query, request.group.id, request.user.id)
+    const [[count]] = await pool.execute(`SELECT COUNT(*) AS total FROM audit_logs WHERE ${conditions.join(' AND ')}`, parameters)
+    const total = Number(count.total)
+    const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)))
     const [rows] = await pool.execute(`SELECT CAST(id AS CHAR) AS id,group_id,group_name,actor_id,actor_name,category,action,entity_id,source,outcome,details,
       DATE_FORMAT(created_at,'%Y-%m-%dT%H:%i:%s.000Z') AS created_at FROM audit_logs
-      WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT 51`, parameters)
+      WHERE ${conditions.join(' AND ')} ORDER BY id DESC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, parameters)
     const [actors] = await pool.execute(`SELECT actor_id AS id, MAX(actor_name) AS name FROM audit_logs
       WHERE ${mine ? 'actor_id' : 'group_id'}=? AND actor_id IS NOT NULL GROUP BY actor_id ORDER BY name`, [mine ? request.user.id : request.group.id])
-    const items = rows.slice(0,50).map((row) => ({ id: String(row.id), groupId: row.group_id, groupName: row.group_name,
+    const items = rows.map((row) => ({ id: String(row.id), groupId: row.group_id, groupName: row.group_name,
       actorId: row.actor_id, actorName: row.actor_name, category: row.category, action: row.action, entityId: row.entity_id,
       source: row.source, outcome: row.outcome, createdAt: row.created_at, details: typeof row.details === 'string' ? JSON.parse(row.details) : row.details }))
-    response.set('Cache-Control','no-store').json({ items, actors, nextCursor: rows.length > 50 ? items.at(-1).id : null })
+    response.set('Cache-Control','no-store').json({ items, actors, page, pageSize, total })
   })
   app.post('/api/groups/:groupId/activity/view', requireAuth, requireGroupMember, async (request, response) => {
     const page = { ledger: '账本', tasks: '任务', chat: 'Chat', activity: '操作记录' }[request.body?.page]
